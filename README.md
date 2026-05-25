@@ -1,9 +1,6 @@
 # xlocllm
 
-`xlocllm` is a local browser-backed inference bridge with a production Python
-SDK. Python talks to a loopback OpenAI-compatible HTTP API, while model weights
-run in a paired browser window with WebGPU/WebNN through MLC WebLLM and
-Transformers.js.
+`xlocllm` is a local browser inference manager for AI/ML models, runnig from python or typescript (soon). xlocllm uses WebGPU and NPU to run models. This is one of the easiest ways to run LLM on your PC. Created by Droidje AI.
 
 ## Install
 
