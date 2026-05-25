@@ -105,6 +105,7 @@ xlocllm run --unit LLM --model "Qwen-3.5-0.8b"
 
 - Full English SDK docs: [`python/xlocllm/docs.md`](python/xlocllm/docs.md)
 - Full Russian SDK docs: [`python/xlocllm/docs_ru.md`](python/xlocllm/docs_ru.md)
+- Ready-to-run Russian recipes: [`python/xlocllm/recipes_ru.md`](python/xlocllm/recipes_ru.md)
 - English model catalog: [`python/xlocllm/models.md`](python/xlocllm/models.md)
 - Russian model catalog: [`python/xlocllm/models_ru.md`](python/xlocllm/models_ru.md)
 - Publishing instructions: [`python/xlocllm/PUBLISHING.md`](python/xlocllm/PUBLISHING.md)

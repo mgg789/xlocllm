@@ -398,6 +398,12 @@ xlocllm run --unit LLM --model "Qwen-3.5-0.8b-fp32" --no-reasoning
 xlocllm bridge --port 1146
 ```
 
+## Готовые рецепты
+
+Практические end-to-end скрипты для RAG, фото-перевода, агентных LLM-стеков,
+voice assistant, OCR/document intelligence и других частых задач вынесены в
+[`recipes_ru.md`](recipes_ru.md).
+
 ## Полный API Reference
 
 ### Top-Level Exports

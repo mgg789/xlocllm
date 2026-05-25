@@ -406,6 +406,12 @@ xlocllm run --unit LLM --model "Qwen-3.5-0.8b-fp32" --no-reasoning
 xlocllm bridge --port 1146
 ```
 
+## Ready Recipes
+
+Russian end-to-end scripts for RAG, photo translation, agentic LLM stacks, voice
+assistant, OCR/document intelligence, and other common tasks live in
+[`recipes_ru.md`](recipes_ru.md).
+
 ## Complete API Reference
 
 ### Top-Level Exports
