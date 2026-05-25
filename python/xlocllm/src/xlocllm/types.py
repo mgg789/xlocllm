@@ -35,9 +35,16 @@ UnitType = Literal[
 class UnitRequest:
     type: str
     model: str
+    reasoning: bool | None = None
+    options: dict[str, Any] | None = None
 
-    def to_payload(self) -> dict[str, str]:
-        return {"type": self.type, "model": self.model}
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"type": self.type, "model": self.model}
+        if self.reasoning is not None:
+            payload["reasoning"] = self.reasoning
+        if self.options:
+            payload["options"] = dict(self.options)
+        return payload
 
 
 Json = dict[str, Any]

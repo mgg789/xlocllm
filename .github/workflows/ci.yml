@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python package
+        run: python -m pip install -e "python/xlocllm[dev]"
+      - name: Ruff
+        run: python -m ruff check python/xlocllm/src python/xlocllm/tests
+      - name: Mypy
+        run: python -m mypy python/xlocllm/src
+      - name: Pytest
+        run: python -m pytest python/xlocllm/tests
+      - name: Build wheel
+        working-directory: python/xlocllm
+        run: |
+          python -m build
+          python -m twine check dist/*
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Web tests
+        run: pnpm --filter @xlocllm/web test
+      - name: Web build
+        run: pnpm --filter @xlocllm/web build

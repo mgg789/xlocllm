@@ -80,6 +80,9 @@ export interface UnitState {
   selectedModelId?: string;
   active: boolean;
   status: UnitStatus;
+  reasoning?: boolean | null;
+  supportsReasoning?: boolean;
+  options?: Record<string, unknown>;
   progress?: number;
   error?: string;
 }
@@ -97,6 +100,15 @@ export interface NpuState {
   backend?: string;
 }
 
+export interface RuntimeCapabilities {
+  webgpu: boolean;
+  webnn: boolean;
+  cpuFallback: boolean;
+  backend: "webgpu" | "wasm";
+  modelCount: number;
+  catalogModelCount: number;
+}
+
 export interface LogEntry {
   time: string;
   level: "info" | "warn" | "error";
@@ -106,6 +118,8 @@ export interface LogEntry {
 export interface RuntimeUnitRequest {
   type: UnitType | string;
   model: string;
+  reasoning?: boolean | null;
+  options?: Record<string, unknown>;
 }
 
 export interface RuntimeModelState {
@@ -115,6 +129,9 @@ export interface RuntimeModelState {
   active: boolean;
   installed: boolean;
   status: UnitStatus;
+  reasoning?: boolean | null;
+  supportsReasoning?: boolean;
+  options?: Record<string, unknown>;
   progress?: number;
   error?: string;
 }
@@ -130,7 +147,10 @@ export interface RuntimeSnapshot {
   logs: LogEntry[];
   metrics: RuntimeMetrics;
   npu: NpuState;
+  capabilities: RuntimeCapabilities;
   requests: RuntimeRequestState;
+  catalogModels: ModelSpec[];
+  catalogModelCount: number;
   installProgress: number;
   installing: boolean;
   running: boolean;
@@ -146,6 +166,7 @@ export interface BrowserRpcRequest {
     | "heatup"
     | "status"
     | "set_active"
+    | "configure_unit"
     | "delete_model"
     | "delete_all_models"
     | "infer"

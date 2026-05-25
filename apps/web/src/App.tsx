@@ -259,12 +259,13 @@ function ControlPanel({
 }) {
   const activeCount = snapshot.models.filter((model) => model.active).length;
   const hibernated = snapshot.models.some((model) => model.status === "hibernated");
+  const visibleCatalogCount = snapshot.capabilities.modelCount;
   return (
     <section className="control-stack">
       <header className="brand-panel">
         <div>
           <h1>xlocllm</h1>
-          <p>v0.1.0 · {catalog.models.length} models in catalog</p>
+          <p>v0.1.0 · {visibleCatalogCount} / {snapshot.catalogModelCount} models available</p>
         </div>
         <button className="icon-button" type="button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Switch theme">
           {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
@@ -496,9 +497,10 @@ function CatalogScreen({
   const runtimeIds = new Set(snapshot.models.map((model) => model.modelId));
   const installedIds = new Set(snapshot.models.filter((model) => model.installed).map((model) => model.modelId));
   const activeIds = new Set(snapshot.models.filter((model) => model.active).map((model) => model.modelId));
+  const catalogModels = snapshot.catalogModels;
   const filtered = useMemo(
-    () => filterModels(catalog.models, filters, search, sort, { runtimeIds, installedIds, activeIds, favorites }),
-    [activeIds, favorites, filters, installedIds, runtimeIds, search, sort],
+    () => filterModels(catalogModels, filters, search, sort, { runtimeIds, installedIds, activeIds, favorites }),
+    [activeIds, catalogModels, favorites, filters, installedIds, runtimeIds, search, sort],
   );
 
   return (
@@ -530,7 +532,7 @@ function CatalogScreen({
             <option value="params-desc">params: high to low</option>
           </select>
         </header>
-        <div className="catalog-count">{filtered.length} of {catalog.models.length} models</div>
+        <div className="catalog-count">{filtered.length} of {catalogModels.length} available models</div>
         <div className="model-grid">
           {filtered.map((model) => {
             const added = runtimeIds.has(model.modelId);
@@ -897,7 +899,12 @@ function recommendationRank(model: ModelSpec): number {
 }
 
 function runtimeUnits(models: RuntimeModelState[]): RuntimeUnitRequest[] {
-  return models.map((model) => ({ type: model.unit, model: model.modelId }));
+  return models.map((model) => ({
+    type: model.unit,
+    model: model.modelId,
+    reasoning: model.reasoning,
+    options: model.options,
+  }));
 }
 
 function unique(values: string[]): string[] {

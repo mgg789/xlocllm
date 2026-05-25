@@ -14,7 +14,7 @@ Package metadata:
 
 - Python: `>=3.10`
 - Runtime dependencies: `fastapi`, `uvicorn[standard]`, `pydantic`
-- CLI entry point: `xlocllm-bridge`
+- CLI entry points: `xlocllm`, `xlocllm-bridge`
 
 ## Core Objects
 
@@ -49,21 +49,31 @@ llm.install()
 llm.run()
 ```
 
+Context-manager cleanup is supported:
+
+```python
+with xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b")]) as runtime:
+    runtime.run()
+    print(runtime.chat("Say hello", temperature=0))
+```
+
 ## OpenAI-Compatible Usage
 
 ```python
 import xlocllm
 from openai import OpenAI
 
-runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b")])
-runtime.run()
+llm = xlocllm.unit(type="LLM", model="Qwen-3.5-0.8b-fp32")
+client = OpenAI(base_url="http://127.0.0.1:1146/v1", api_key="xlocllm")
 
-client = OpenAI(base_url=runtime.url, api_key="xlocllm")
-response = client.chat.completions.create(
-    model="Qwen3.5-0.8B-q4f16_1-MLC",
-    messages=[{"role": "user", "content": "Say hello"}],
-)
-print(response.choices[0].message.content)
+with xlocllm.runtime([llm]) as runtime:
+    runtime.run()
+    response = client.chat.completions.create(
+        model="Qwen-3.5-0.8b-fp32",
+        messages=[{"role": "user", "content": "What is lidar?"}],
+        max_tokens=64,
+    )
+    print(response.choices[0].message.content)
 ```
 
 Supported OpenAI-like endpoints:
@@ -76,10 +86,12 @@ Supported OpenAI-like endpoints:
 
 ## Top-Level API
 
-### `xlocllm.unit(type, model)`
+### `xlocllm.unit(type, model, reasoning=None, options=None)`
 
 Creates a `Unit` by resolving the requested unit type and model name against the
-catalog.
+catalog. `reasoning` may be `True`, `False`, or `None` for LLM families that
+advertise thinking/reasoning control. `options` is a dictionary passed to the
+browser runtime for that unit.
 
 ```python
 unit = xlocllm.unit("chat", "qwen-0.8b")
@@ -112,17 +124,26 @@ Filters:
 - `provider`
 - `availability`
 - `npu`
+- `webgpu` - pass `False` to list only CPU/WASM fallback-capable models
+- `cpu` - alias for CPU/WASM fallback mode
+- `available_without_webgpu` - explicit CPU/WASM fallback filter
 - `search`
 - `max_vram_mb`
 - `max_disk_mb`
 - `max_size_gb`
 - `max_parameters_b`
+- `limit_per_unit`
 
 Example:
 
 ```python
 small_llms = xlocllm.models(unit="LLM", max_vram_mb=1500, search="qwen")
+cpu_models = xlocllm.models(webgpu=False)
 ```
+
+`webgpu=False` excludes MLC/WebLLM models and heavy Transformers.js models. The
+fallback catalog keeps at least one usable model for every unit class whenever
+the catalog contains a Transformers.js candidate for that class.
 
 ### `xlocllm.model(name, unit=None)`
 
@@ -152,6 +173,27 @@ Returns a dictionary with:
 - browser-reported resource metrics when available
 - catalog model count
 
+### `xlocllm.benchmark(type=None, ping_hf=True, timeout=2.0, browser=True, browser_timeout=15.0, port=None)`
+
+Returns a dictionary with local system parameters, RAM, free disk space, browser
+capabilities, and Hugging Face latency. By default it starts a temporary local
+bridge and mini browser window to detect real WebGPU/WebNN/NPU availability,
+then closes them after the probe.
+
+When `type` is provided, benchmark also returns two recommendations for that
+unit type:
+
+- `fast` - a smaller model expected to run quickly and stably.
+- `quality` - the strongest model that appears to fit the detected/estimated
+  device limits.
+
+```python
+system = xlocllm.benchmark()
+llm_fit = xlocllm.benchmark("LLM")
+```
+
+Use `browser=False` for CI/headless checks that must not open a browser window.
+
 ## Unit API
 
 Properties:
@@ -161,6 +203,9 @@ Properties:
 - `unit.model`
 - `unit.label`
 - `unit.model_info`
+- `unit.reasoning`
+- `unit.options`
+- `unit.supports_reasoning`
 
 Methods:
 
@@ -168,7 +213,9 @@ Methods:
 - `unit.to_dict()` - payload plus label and model metadata
 - `unit.status()` - attached runtime state if available
 - `unit.remove()` - remove from attached runtime without deleting cache
+- `unit.delete_cache(bridge=None)` - delete browser cache for the model
 - `unit.delete(delete_cache=True, bridge=None)` - remove from runtime and optionally delete browser cache
+- `unit.set_reasoning(enabled)` - hot-update reasoning control when attached to a running runtime
 - `unit.as_runtime(port=1146)` - create or reuse a single-unit runtime
 - `unit.install(port=1146)`
 - `unit.run(port=1146)`
@@ -194,6 +241,8 @@ Methods:
 
 - `runtime.add_unit(unit)`
 - `runtime.remove_unit(unit_id, delete_cache=False)`
+- `runtime.configure_unit(unit_id, reasoning=None, options=None)`
+- `runtime.set_reasoning(unit_id, enabled)`
 - `runtime.unit_status(unit_id)`
 - `runtime.units(as_dict=False, state=False)`
 - `runtime.models()`
@@ -212,6 +261,9 @@ Methods:
 - `runtime.open()`
 - `runtime.close()`
 - `runtime.wait_ready(timeout=None, require_browser=False)`
+
+`Runtime` implements `with` cleanup. Exiting the context closes the owned bridge
+and browser window when they were started by that runtime.
 
 `runtime.remove_unit()` accepts the unit id, model id, or unit type. If the
 runtime is running and `delete_cache=False`, the SDK asks the browser runtime to
@@ -232,7 +284,7 @@ Methods:
 - `bridge.close()`
 - `bridge.status()`
 - `bridge.health()`
-- `bridge.models()` - full catalog as dictionaries
+- `bridge.models()` - browser-visible catalog as dictionaries when paired; local catalog fallback otherwise
 - `bridge.units()` - unit definitions as dictionaries
 - `bridge.logs(limit=200)`
 - `bridge.wait_ready(timeout=None, require_browser=False)`
@@ -249,19 +301,33 @@ Use `runtime.invoke(endpoint, payload)` or `bridge.invoke(endpoint, payload)`.
 
 Supported endpoints:
 
-- `chat.completions`
-- `responses`
-- `embeddings`
-- `rerank`
-- `translate`
-- `tts`
-- `image.classify`
-- `image.detect`
-- `image.segment`
-- `depth`
-- `image-to-text`
-- `asr`
-- `zero-shot-image`
+| Endpoint | Unit | Required input | Return shape |
+| --- | --- | --- | --- |
+| `chat.completions`, `chat` | `LLM` | `messages` or `prompt` | `{content, raw?}` |
+| `responses` | `LLM` | `input` | response-like text content |
+| `embeddings`, `embedding` | `embedding` | `input` string or list | `{embeddings}` |
+| `rerank`, `reranker` | `reranker` | `query`, `documents` | `{results}` sorted by score |
+| `translate`, `translator` | `translator` | `text`/`input`, optional `src_lang`, `tgt_lang` | backend translation output |
+| `tts` | `tts` | `text`/`input` | audio-like result, serialized when possible |
+| `image.classify`, `image-classification` | `image-classification` | `image`/`input`/`url` | `{labels, raw}` |
+| `image.detect`, `object-detection` | `object-detection` | `image`/`input`/`url` | `{boxes, raw}` |
+| `image.segment`, `image-segmentation` | `image-segmentation` | `image`/`input`/`url` | `{segments, raw}` |
+| `depth`, `depth-estimation` | `depth-estimation` | `image`/`input`/`url` | `{depth, raw}` |
+| `image-to-text`, `vlm` | `vlm` | `image`/`input`/`url` | `{text, raw}` |
+| `asr`, `speech-to-text` | `asr` | `audio`/`input`/`url` | `{text, chunks?, raw}` |
+| `zero-shot-image` | `zero-shot-image` | `image`, `labels`/`candidate_labels` | `{labels, raw}` |
+| `language-id` | `language-id` | `audio`/`input`/`url` | `{labels, raw}` |
+| `audio.classify`, `audio-classification` | `audio-classification` | `audio`/`input`/`url` | `{labels, raw}` |
+| `ocr` | `ocr` | `image`/`input`/`url` | `{text, raw}` |
+| `document-layout` | `document-layout` | `image`/`input`/`url` | `{boxes, raw}` |
+| `table-detection` | `table-detection` | `image`/`input`/`url` | `{boxes, raw}` |
+| `document-qa` | `document-qa` | `image`, `question`/`query` | `{answers, raw}` |
+| `text.classify`, `text-classification` | `text-classification` | `text`/`input` | `{labels, raw}` |
+| `ner`, `token-classification` | `ner` | `text`/`input` | `{entities, raw}` |
+| `zero-shot-text`, `zero-shot-classification` | `zero-shot-text` | `text`, `labels`/`candidate_labels` | `{labels, raw}` |
+| `summarization`, `summarize` | `summarization` | `text`/`input` | `{summary, raw}` |
+| `text2text`, `text2text-generation` | `text2text` | `text`/`input` | `{text, raw}` |
+| `code`, `code.embed` | `code` | `text`/`input` | `{features, raw}` |
 
 Examples:
 
@@ -269,6 +335,7 @@ Examples:
 runtime.invoke("embeddings", {"model": "Xenova/multilingual-e5-small", "input": ["hello"]})
 runtime.invoke("translate", {"model": "Xenova/opus-mt-en-ru", "text": "hello"})
 runtime.invoke("rerank", {"query": "local llm", "documents": ["browser", "server"]})
+runtime.invoke("zero-shot-text", {"text": "Fast local inference", "labels": ["AI", "finance"]})
 ```
 
 Convenience wrappers:
@@ -297,8 +364,47 @@ models are running. The Python bridge is only a local control and API layer; the
 model weights and inference execution live in browser storage and browser GPU
 runtime.
 
-Some catalog units already exist for future use, but direct invoke routing is
-currently implemented only for the endpoints listed above.
+When WebGPU is unavailable, the browser runtime switches supported
+Transformers.js models to WASM and rejects MLC/WebLLM or heavy model requests
+before loading. `runtime.status()["runtime"]["capabilities"]` reports
+`webgpu`, `webnn`, `cpuFallback`, and the number of visible catalog models.
+
+## Reasoning Control
+
+Reasoning control is available for LLM families that advertise thinking mode,
+currently detected for Qwen3/Qwen3.5, DeepSeek-R1, gpt-oss, and QwQ-style model
+names. Set it when creating the unit:
+
+```python
+llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b-fp32", reasoning=False)
+```
+
+Change it while a runtime is already running:
+
+```python
+runtime.set_reasoning(llm.id, True)
+llm.set_reasoning(False)
+```
+
+Per-request values such as `reasoning`, `enable_thinking`, or
+`chat_template_kwargs={"enable_thinking": ...}` override the unit default. The
+browser runtime passes `chat_template_kwargs.enable_thinking` for
+Transformers.js pipelines and adds Qwen's `/think` or `/no_think` marker for
+MLC/WebLLM-style chat when needed.
+
+## CLI
+
+```powershell
+xlocllm status
+xlocllm benchmark
+xlocllm benchmark LLM
+xlocllm benchmark embedding --no-browser --no-hf
+xlocllm models --unit LLM --no-webgpu
+xlocllm model "Qwen-3.5-0.8b-fp32" --unit LLM
+xlocllm run --unit LLM --model "Qwen-3.5-0.8b" --port 1146
+xlocllm run --unit LLM --model "Qwen-3.5-0.8b-fp32" --no-reasoning
+xlocllm bridge --port 1146
+```
 
 ## Complete API Reference
 
@@ -310,12 +416,16 @@ Imported directly from `xlocllm`:
 - `xlocllm.runtime(units, port=1146, bridge=None, runtime_id=None) -> Runtime`
 - `xlocllm.model(name, unit=None) -> ModelInfo`
 - `xlocllm.models(...) -> list[ModelInfo]`
+- `xlocllm.cpu_fallback_model_ids() -> set[str]`
+- `xlocllm.supports_cpu_fallback(model_dict) -> bool`
+- `xlocllm.supports_reasoning(model_dict) -> bool`
 - `xlocllm.bridges(active_only=True) -> list[Bridge]`
 - `xlocllm.runtimes(active_only=True) -> list[Runtime]`
 - `xlocllm.status() -> dict`
+- `xlocllm.benchmark(type=None, ...) -> dict`
 - `xlocllm.window(...) -> WindowHandle`
 - `xlocllm.GetBridge(port=None) -> Bridge | BridgeGroup`
-- classes: `Bridge`, `BridgeGroup`, `ModelInfo`, `Runtime`, `Unit`
+- classes: `Bridge`, `BridgeGroup`, `ModelInfo`, `Runtime`, `Unit`, `UnitRequest`
 - exceptions: `XlocLLMError`, `BridgeNotReady`, `BrowserNotConnected`,
   `ModelNotFound`, `RuntimeNotFound`, `UnitNotFound`
 
@@ -337,6 +447,8 @@ Properties:
 - `disk_mb: int` - approximate disk/cache size.
 - `vram_mb: int` - approximate GPU memory requirement.
 - `npu_eligible: bool` - whether WebNN/NPU is preferred when available.
+- `cpu_fallback: bool` - whether the model can run in CPU/WASM fallback mode.
+- `supports_reasoning: bool` - whether the model advertises reasoning control.
 
 Methods:
 
@@ -351,7 +463,7 @@ Methods:
 Constructor is normally not called directly. Prefer:
 
 ```python
-unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b")
+unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None)
 ```
 
 Properties:
@@ -359,13 +471,16 @@ Properties:
 - `type: str` - normalized unit type.
 - `model: str` - resolved exact model id.
 - `model_info: ModelInfo | None` - catalog entry.
+- `reasoning: bool | None` - unit default for reasoning-capable LLMs.
+- `options: dict[str, Any]` - browser runtime options attached to the unit.
 - `id: str` - local stable id in the form `<type>:<modelId>`.
 - `label: str` - catalog label, or model id if metadata is absent.
+- `supports_reasoning: bool` - catalog-derived reasoning capability.
 
 Methods:
 
-- `to_payload() -> dict[str, str]`
-  Returns the bridge payload: `{"type": type, "model": model}`.
+- `to_payload() -> dict[str, Any]`
+  Returns the bridge payload: `{"type": type, "model": model, ...}`.
 - `to_dict() -> dict[str, Any]`
   Returns id, type, model, label, and model metadata.
 - `status() -> dict[str, Any]`
@@ -376,6 +491,11 @@ Methods:
 - `delete(delete_cache=True, bridge=None) -> dict[str, Any]`
   If attached to a runtime, removes it from that runtime. If `delete_cache=True`,
   asks the bridge to delete the browser cache for this model.
+- `delete_cache(bridge=None) -> dict[str, Any]`
+  Deletes browser-side cache for this model through a bridge.
+- `set_reasoning(enabled) -> dict[str, Any]`
+  Updates local reasoning setting and pushes the change into the running runtime
+  when attached.
 - `as_runtime(port=1146) -> Runtime`
   Creates or reuses a single-unit runtime.
 - `install(port=1146) -> dict[str, Any]`
@@ -426,6 +546,11 @@ Methods:
   asks the bridge to delete model cache.
 - `unit_status(unit_id) -> dict[str, Any]`
   Returns the best available browser state for a unit.
+- `configure_unit(unit_id, reasoning=None, options=None) -> dict[str, Any]`
+  Updates unit options. If runtime is running, sends the update to the paired
+  browser runtime without recreating the Python object.
+- `set_reasoning(unit_id, enabled) -> dict[str, Any]`
+  Convenience wrapper for `configure_unit(..., reasoning=enabled)`.
 - `units(as_dict=False, state=False) -> list[Any]`
   Returns configured `Unit` objects, dictionaries, or browser-reported unit
   states when `state=True`.
@@ -465,6 +590,8 @@ Methods:
   Shuts down the bridge and removes runtime registry state.
 - `wait_ready(timeout=None, require_browser=False) -> Runtime`
   Waits until the bridge is reachable, and optionally until the browser is paired.
+- `__enter__() -> Runtime`, `__exit__(...) -> False`
+  Context-manager support for cleanup.
 
 ### `Bridge`
 
@@ -559,10 +686,12 @@ Properties:
 
 - `type: str`
 - `model: str`
+- `reasoning: bool | None`
+- `options: dict[str, Any] | None`
 
 Methods:
 
-- `to_payload() -> dict[str, str]`
+- `to_payload() -> dict[str, Any]`
 
 ### Exceptions
 

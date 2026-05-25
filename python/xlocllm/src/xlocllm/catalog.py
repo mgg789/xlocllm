@@ -10,6 +10,10 @@ from typing import Any
 from ._paths import repo_root_from_here
 from .exceptions import ModelNotFound, UnitNotFound
 
+CPU_FALLBACK_TIERS = {"tiny", "small"}
+CPU_FALLBACK_MAX_VRAM_MB = 1500
+CPU_FALLBACK_MAX_DISK_MB = 1600
+
 
 @dataclass(frozen=True)
 class ModelInfo:
@@ -55,6 +59,14 @@ class ModelInfo:
     def npu_eligible(self) -> bool:
         return bool(self.data.get("npuEligible", False))
 
+    @property
+    def cpu_fallback(self) -> bool:
+        return supports_cpu_fallback(self.data)
+
+    @property
+    def supports_reasoning(self) -> bool:
+        return supports_reasoning(self.data)
+
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
 
@@ -81,6 +93,53 @@ def all_models() -> list[dict[str, Any]]:
 
 def all_units() -> list[dict[str, Any]]:
     return list(load_catalog()["units"])
+
+
+def supports_cpu_fallback(candidate: dict[str, Any]) -> bool:
+    if candidate.get("runtime") != "transformers":
+        return False
+    if candidate.get("availability") == "unsupported":
+        return False
+    if str(candidate.get("hardwareTier", "")).lower() in CPU_FALLBACK_TIERS:
+        return True
+    return (
+        int(candidate.get("vramMB") or 0) <= CPU_FALLBACK_MAX_VRAM_MB
+        and int(candidate.get("diskMB") or 0) <= CPU_FALLBACK_MAX_DISK_MB
+    )
+
+
+def supports_reasoning(candidate: dict[str, Any]) -> bool:
+    if candidate.get("unit") != "LLM":
+        return False
+    haystack = " ".join(
+        [
+            str(candidate.get("modelId", "")),
+            str(candidate.get("label", "")),
+            str(candidate.get("notes", "")),
+            *[str(alias) for alias in candidate.get("aliases", [])],
+            *[str(tag) for tag in candidate.get("tags", [])],
+        ]
+    ).lower()
+    return any(marker in haystack for marker in ("qwen3", "qwen3.5", "qwen3_5", "deepseek-r1", "gpt-oss", "qwq"))
+
+
+def cpu_fallback_model_ids(*, min_per_unit: int = 2) -> set[str]:
+    result = {str(candidate["modelId"]) for candidate in all_models() if supports_cpu_fallback(candidate)}
+    for unit in all_units():
+        unit_type = str(unit["type"])
+        available = [candidate for candidate in all_models() if candidate["unit"] == unit_type]
+        if len([candidate for candidate in available if str(candidate["modelId"]) in result]) >= min_per_unit:
+            continue
+        fallback = sorted(
+            [
+                candidate
+                for candidate in available
+                if candidate.get("runtime") == "transformers" and candidate.get("availability") != "unsupported"
+            ],
+            key=_model_weight,
+        )[:min_per_unit]
+        result.update(str(candidate["modelId"]) for candidate in fallback)
+    return result
 
 
 def resolve_model(unit_type: str, model_name: str) -> dict[str, Any]:
@@ -125,17 +184,25 @@ def models(
     provider: str | None = None,
     availability: str | None = None,
     npu: bool | None = None,
+    webgpu: bool | None = None,
+    cpu: bool | None = None,
+    available_without_webgpu: bool | None = None,
     search: str | None = None,
     max_vram_mb: int | None = None,
     max_disk_mb: int | None = None,
     max_size_gb: float | None = None,
     max_parameters_b: float | None = None,
+    limit_per_unit: int | None = None,
 ) -> list[ModelInfo]:
     normalized_unit = normalize_unit(unit) if unit is not None else None
     normalized_search = _normalize(search) if search else None
+    require_cpu_fallback = (webgpu is False) or (cpu is True) or (available_without_webgpu is True)
+    cpu_model_ids = cpu_fallback_model_ids() if require_cpu_fallback else set()
     result: list[ModelInfo] = []
     for candidate in all_models():
         if normalized_unit is not None and candidate["unit"] != normalized_unit:
+            continue
+        if require_cpu_fallback and str(candidate["modelId"]) not in cpu_model_ids:
             continue
         if runtime is not None and _normalize(candidate["runtime"]) != _normalize(runtime):
             continue
@@ -183,6 +250,8 @@ def models(
             if normalized_search not in _normalize(haystack):
                 continue
         result.append(ModelInfo(candidate))
+    if limit_per_unit is not None:
+        result = _limit_models_per_unit(result, limit_per_unit)
     return result
 
 
@@ -220,3 +289,27 @@ def catalog_path() -> Path:
 
 def _normalize(value: str) -> str:
     return "-".join(value.strip().lower().replace("_", "-").split())
+
+
+def _model_weight(candidate: dict[str, Any]) -> tuple[int, int, int, float]:
+    tier_order = {"tiny": 0, "small": 1, "medium": 2, "large": 3}
+    return (
+        tier_order.get(str(candidate.get("hardwareTier", "")).lower(), 99),
+        int(candidate.get("vramMB") or 0),
+        int(candidate.get("diskMB") or 0),
+        float(candidate.get("parameterB") or 0),
+    )
+
+
+def _limit_models_per_unit(items: list[ModelInfo], limit: int) -> list[ModelInfo]:
+    if limit <= 0:
+        return []
+    counts: dict[str, int] = {}
+    result: list[ModelInfo] = []
+    for item in items:
+        current = counts.get(item.unit, 0)
+        if current >= limit:
+            continue
+        counts[item.unit] = current + 1
+        result.append(item)
+    return result

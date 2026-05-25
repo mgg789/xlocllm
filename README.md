@@ -33,21 +33,29 @@ print(runtime.url)       # http://127.0.0.1:1146/v1
 print(runtime.status())  # bridge, runtime, models, metrics
 ```
 
+Without WebGPU, ask for the CPU/WASM-compatible catalog:
+
+```python
+models = xlocllm.models(webgpu=False)
+```
+
 ## OpenAI-Compatible Usage
 
 ```python
 import xlocllm
 from openai import OpenAI
 
-runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b")])
-runtime.run()
+llm = xlocllm.unit(type="LLM", model="Qwen-3.5-0.8b-fp32")
+client = OpenAI(base_url="http://127.0.0.1:1146/v1", api_key="xlocllm")
 
-client = OpenAI(base_url=runtime.url, api_key="xlocllm")
-response = client.chat.completions.create(
-    model="Qwen3.5-0.8B-q4f16_1-MLC",
-    messages=[{"role": "user", "content": "Say hello"}],
-)
-print(response.choices[0].message.content)
+with xlocllm.runtime([llm]) as runtime:
+    runtime.run()
+    response = client.chat.completions.create(
+        model="Qwen-3.5-0.8b-fp32",
+        messages=[{"role": "user", "content": "What is lidar?"}],
+        max_tokens=64,
+    )
+    print(response.choices[0].message.content)
 ```
 
 ## Python SDK
@@ -65,10 +73,35 @@ Useful helpers:
 
 ```python
 xlocllm.models(unit="LLM", max_vram_mb=1500)
+xlocllm.models(webgpu=False)
 xlocllm.model("Qwen-3.5-0.8b", unit="LLM")
 xlocllm.bridges()
 xlocllm.runtimes()
 xlocllm.status()
+xlocllm.benchmark()
+xlocllm.benchmark("LLM")
+```
+
+`benchmark()` temporarily opens a paired mini browser by default to detect real
+WebGPU/WebNN/NPU support, then closes it. With a unit type, it returns `fast`
+and `quality` model recommendations for the detected device.
+
+Reasoning-capable LLM families can be configured at unit creation or while the
+runtime is running:
+
+```python
+llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b-fp32", reasoning=False)
+runtime.set_reasoning(llm.id, True)
+```
+
+CLI:
+
+```powershell
+xlocllm status
+xlocllm benchmark
+xlocllm benchmark LLM
+xlocllm models --unit LLM --no-webgpu
+xlocllm run --unit LLM --model "Qwen-3.5-0.8b"
 ```
 
 ## Documentation

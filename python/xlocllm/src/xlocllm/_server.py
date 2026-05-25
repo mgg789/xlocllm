@@ -205,7 +205,7 @@ def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI
 
     @app.get("/xlocllm/v1/models")
     async def xloc_models() -> dict[str, Any]:
-        return {"models": all_models()}
+        return {"models": visible_catalog_models(hub)}
 
     @app.get("/xlocllm/v1/units")
     async def xloc_units() -> dict[str, Any]:
@@ -244,6 +244,10 @@ def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI
     async def set_active(payload: dict[str, Any]) -> Any:
         return await safe_rpc(hub, "set_active", payload=payload, timeout=300)
 
+    @app.post("/xlocllm/v1/runtime/configure_unit")
+    async def configure_unit(payload: dict[str, Any]) -> Any:
+        return await safe_rpc(hub, "configure_unit", payload=payload, timeout=300)
+
     @app.post("/xlocllm/v1/models/delete")
     async def delete_model(payload: dict[str, Any]) -> Any:
         return await safe_rpc(hub, "delete_model", payload=payload, timeout=300)
@@ -267,7 +271,7 @@ def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI
                     "created": 0,
                     "owned_by": "xlocllm",
                 }
-                for model in all_models()
+                for model in visible_catalog_models(hub)
             ],
         }
 
@@ -419,6 +423,13 @@ def bridge_status(port: int, hub: BrowserHub) -> dict[str, Any]:
         "runtime": hub.status,
         "logs": hub.logs[-200:],
     }
+
+
+def visible_catalog_models(hub: BrowserHub) -> list[dict[str, Any]]:
+    catalog_models = hub.status.get("catalogModels")
+    if isinstance(catalog_models, list) and all(isinstance(item, dict) for item in catalog_models):
+        return [dict(item) for item in catalog_models]
+    return all_models()
 
 
 async def shutdown_after(app: FastAPI, port: int, delay: float) -> None:

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveModel, unitDefinitions } from "./catalog";
+import { supportedModelsForCapabilities, supportsReasoning, resolveModel, unitDefinitions } from "./catalog";
 
 describe("catalog", () => {
   it("contains every requested unit", () => {
@@ -46,5 +46,23 @@ describe("catalog", () => {
     expect(qwenOnnx?.npuEligible).toBe(true);
     expect(qwenFull?.backendModelId).toBe("onnx-community/Qwen3.5-0.8B-ONNX");
     expect(qwenFull?.dtype).toBe("fp32");
+  });
+
+  it("keeps a usable catalog without WebGPU", () => {
+    const models = supportedModelsForCapabilities(false);
+    const units = new Set(models.map((model) => model.unit));
+
+    for (const unit of unitDefinitions) {
+      expect(units.has(unit.type)).toBe(true);
+    }
+    expect(models.every((model) => model.runtime === "transformers")).toBe(true);
+  });
+
+  it("marks reasoning-capable LLM families", () => {
+    const qwenFull = resolveModel("LLM", "Qwen-3.5-0.8b-full");
+    const embedding = resolveModel("embedding", "multilingual-e5-small");
+
+    expect(qwenFull && supportsReasoning(qwenFull)).toBe(true);
+    expect(embedding && supportsReasoning(embedding)).toBe(false);
   });
 });

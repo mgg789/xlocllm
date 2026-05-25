@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xlocllm"
-version = "1.0.0"
+version = "1.0.1"
 description = "Local browser-backed LLM and multimodal inference bridge"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -52,6 +52,7 @@ dev = [
 ]
 
 [project.scripts]
+xlocllm = "xlocllm.cli:main"
 xlocllm-bridge = "xlocllm._server:main"
 
 [tool.hatch.build.targets.wheel]

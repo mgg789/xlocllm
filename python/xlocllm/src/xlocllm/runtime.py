@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from .bridge import Bridge, bridges
 from .catalog import ModelInfo, all_models, model as catalog_model, resolve_model
@@ -16,6 +16,8 @@ class Unit:
     type: str
     model: str
     model_info: ModelInfo | None = None
+    reasoning: bool | None = None
+    options: dict[str, Any] = field(default_factory=dict)
     _runtime: Runtime | None = field(default=None, init=False, repr=False, compare=False)
     _single_runtime: Runtime | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -29,12 +31,27 @@ class Unit:
             return self.model_info.label
         return self.model
 
-    def to_payload(self) -> dict[str, str]:
-        return {"type": self.type, "model": self.model}
+    @property
+    def supports_reasoning(self) -> bool:
+        return bool(self.model_info and self.model_info.supports_reasoning)
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"type": self.type, "model": self.model}
+        if self.reasoning is not None:
+            payload["reasoning"] = self.reasoning
+        if self.options:
+            payload["options"] = dict(self.options)
+        return payload
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = self.to_payload()
-        payload.update({"id": self.id, "label": self.label})
+        payload.update(
+            {
+                "id": self.id,
+                "label": self.label,
+                "supports_reasoning": self.supports_reasoning,
+            }
+        )
         if self.model_info is not None:
             payload["model_info"] = self.model_info.to_dict()
         return payload
@@ -48,6 +65,18 @@ class Unit:
         if self._runtime is None:
             return {"ok": True, "removed": False, "unit": self.to_dict()}
         return self._runtime.remove_unit(self.id, delete_cache=False)
+
+    def delete_cache(self, *, bridge: Bridge | None = None) -> dict[str, Any]:
+        active_bridge = bridge or (self._runtime.bridge if self._runtime is not None else None) or Bridge()
+        return active_bridge.delete_model(self.type, self.model)
+
+    def set_reasoning(self, enabled: bool | None) -> dict[str, Any]:
+        if enabled is not None and not self.supports_reasoning:
+            raise ValueError(f"{self.label} does not advertise reasoning control")
+        self.reasoning = enabled
+        if self._runtime is None:
+            return {"ok": True, "updated": self.to_dict(), "runtime_updated": False}
+        return self._runtime.configure_unit(self.id, reasoning=enabled)
 
     def delete(self, *, delete_cache: bool = True, bridge: Bridge | None = None) -> dict[str, Any]:
         if self._runtime is not None:
@@ -82,6 +111,7 @@ class Unit:
 
 
 UnitRuntime = Unit
+_REASONING_UNSET: Any = object()
 
 
 class Runtime:
@@ -115,13 +145,30 @@ class Runtime:
 
     @property
     def unit_requests(self) -> list[UnitRequest]:
-        return [UnitRequest(type=item.type, model=item.model) for item in self._units]
+        return [
+            UnitRequest(type=item.type, model=item.model, reasoning=item.reasoning, options=dict(item.options))
+            for item in self._units
+        ]
 
     def __iter__(self) -> Any:
         return iter(self._units)
 
     def __len__(self) -> int:
         return len(self._units)
+
+    def __enter__(self) -> Runtime:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> Literal[False]:
+        if self.bridge is not None:
+            try:
+                self.close()
+            except Exception:  # noqa: BLE001
+                try:
+                    self.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+        return False
 
     def add_unit(self, item: Unit | UnitRequest, *, activate: bool = True) -> Unit:
         unit = self._coerce_unit(item)
@@ -132,7 +179,7 @@ class Runtime:
         unit._runtime = self
         self._units.append(unit)
         if activate and self.bridge is not None and self.running:
-            self.bridge.set_active(unit.type, active=True, model=unit.model)
+            self.bridge._post("/xlocllm/v1/runtime/run", {"units": [unit.to_payload()]}, timeout=1800)
         self._save_runtime_state("running" if self.running else "configured")
         return unit
 
@@ -166,6 +213,38 @@ class Runtime:
                 if isinstance(unit_state, dict) and unit_state.get("type") == unit.type:
                     return {"ok": True, "attached": True, "unit": unit.to_dict(), "state": unit_state}
         return {"ok": True, "attached": True, "unit": unit.to_dict(), "state": {"status": "selected"}}
+
+    def configure_unit(
+        self,
+        unit_id: str,
+        *,
+        reasoning: Any = _REASONING_UNSET,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        unit = self._find_unit(unit_id)
+        if unit is None:
+            raise ValueError(f"Unit not found in runtime: {unit_id!r}")
+        if reasoning is not _REASONING_UNSET:
+            if reasoning is not None and not isinstance(reasoning, bool):
+                raise TypeError("reasoning must be True, False, or None")
+            if reasoning is not None and not unit.supports_reasoning:
+                raise ValueError(f"{unit.label} does not advertise reasoning control")
+            unit.reasoning = reasoning
+        if options is not None:
+            unit.options.update(options)
+        result: dict[str, Any] = {"ok": True, "updated": unit.to_dict(), "runtime_updated": False}
+        if self.bridge is not None and self.running:
+            result["runtime"] = self.bridge._post(
+                "/xlocllm/v1/runtime/configure_unit",
+                {"unit": unit.to_payload(), "unit_id": unit.id},
+                timeout=300,
+            )
+            result["runtime_updated"] = True
+        self._save_runtime_state("running" if self.running else "configured")
+        return result
+
+    def set_reasoning(self, unit_id: str, enabled: bool | None) -> dict[str, Any]:
+        return self.configure_unit(unit_id, reasoning=enabled)
 
     def units(self, *, as_dict: bool = False, state: bool = False) -> list[Any]:
         if state:
@@ -342,7 +421,13 @@ class Runtime:
             return item
         if isinstance(item, UnitRequest):
             resolved = resolve_model(item.type, item.model)
-            return Unit(type=str(resolved["unit"]), model=str(resolved["modelId"]), model_info=ModelInfo(resolved))
+            return Unit(
+                type=str(resolved["unit"]),
+                model=str(resolved["modelId"]),
+                model_info=ModelInfo(resolved),
+                reasoning=item.reasoning,
+                options=dict(item.options or {}),
+            )
         raise TypeError(f"Unsupported runtime item: {type(item)!r}")
 
     def _find_unit(self, unit_id: str) -> Unit | None:
@@ -397,9 +482,24 @@ class Runtime:
         )
 
 
-def unit(type: str, model: str) -> Unit:  # noqa: A002
+def unit(
+    type: str,  # noqa: A002
+    model: str,
+    *,
+    reasoning: bool | None = None,
+    options: dict[str, Any] | None = None,
+) -> Unit:
     resolved = resolve_model(type, model)
-    return Unit(type=str(resolved["unit"]), model=str(resolved["modelId"]), model_info=ModelInfo(resolved))
+    unit_item = Unit(
+        type=str(resolved["unit"]),
+        model=str(resolved["modelId"]),
+        model_info=ModelInfo(resolved),
+        reasoning=reasoning,
+        options=dict(options or {}),
+    )
+    if reasoning is not None and not unit_item.supports_reasoning:
+        raise ValueError(f"{unit_item.label} does not advertise reasoning control")
+    return unit_item
 
 
 def runtime(
@@ -428,7 +528,15 @@ def runtimes(active_only: bool = True) -> list[Runtime]:
         unit_items = []
         for item in record.get("units", []):
             if isinstance(item, dict) and isinstance(item.get("type"), str) and isinstance(item.get("model"), str):
-                unit_items.append(UnitRequest(type=item["type"], model=item["model"]))
+                options = item.get("options")
+                unit_items.append(
+                    UnitRequest(
+                        type=item["type"],
+                        model=item["model"],
+                        reasoning=item.get("reasoning") if isinstance(item.get("reasoning"), bool) else None,
+                        options=options if isinstance(options, dict) else None,
+                    )
+                )
         if not unit_items:
             continue
         result.append(Runtime(unit_items, port=port, bridge=bridge, runtime_id=runtime_id))

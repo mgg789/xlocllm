@@ -75,15 +75,17 @@ print(runtime.status())
 import xlocllm
 from openai import OpenAI
 
-runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b")])
-runtime.run()
+llm = xlocllm.unit(type="LLM", model="Qwen-3.5-0.8b-fp32")
+client = OpenAI(base_url="http://127.0.0.1:1146/v1", api_key="xlocllm")
 
-client = OpenAI(base_url=runtime.url, api_key="xlocllm")
-response = client.chat.completions.create(
-    model="Qwen3.5-0.8B-q4f16_1-MLC",
-    messages=[{"role": "user", "content": "Say hello"}],
-)
-print(response.choices[0].message.content)
+with xlocllm.runtime([llm]) as runtime:
+    runtime.run()
+    response = client.chat.completions.create(
+        model="Qwen-3.5-0.8b-fp32",
+        messages=[{"role": "user", "content": "What is lidar?"}],
+        max_tokens=64,
+    )
+    print(response.choices[0].message.content)
 ```
 
 With the optional helper:
@@ -97,8 +99,9 @@ client = runtime.client()
 ```python
 model = xlocllm.model("Qwen-3.5-0.8b", unit="LLM")
 models = xlocllm.models(unit="LLM", max_vram_mb=1500)
+cpu_models = xlocllm.models(webgpu=False)
 
-unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b")
+unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None)
 runtime = xlocllm.runtime([unit], port=1146)
 bridge = xlocllm.Bridge(port=1146)
 
@@ -107,6 +110,29 @@ print(bridge.url)
 print(xlocllm.bridges())
 print(xlocllm.runtimes())
 print(xlocllm.status())
+print(xlocllm.benchmark())
+print(xlocllm.benchmark("LLM"))
+```
+
+`benchmark()` temporarily opens a paired mini browser by default to detect real
+WebGPU/WebNN/NPU support, then closes it. With a unit type, it returns `fast`
+and `quality` recommendations.
+
+Reasoning-capable LLMs can be configured at creation and updated hot:
+
+```python
+llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b-fp32", reasoning=False)
+runtime.set_reasoning(llm.id, True)
+```
+
+CLI:
+
+```powershell
+xlocllm status
+xlocllm benchmark
+xlocllm benchmark LLM
+xlocllm models --unit LLM --no-webgpu
+xlocllm run --unit LLM --model "Qwen-3.5-0.8b"
 ```
 
 ## Documentation
@@ -159,8 +185,9 @@ python -m build
 ## Notes
 
 The bridge binds to loopback only. The browser window must remain open while
-browser-backed models are running. Model availability depends on browser support
-for WebGPU/WebNN and the model's runtime backend.
+browser-backed models are running. Without WebGPU, xlocllm exposes only the
+CPU/WASM-compatible Transformers.js subset and rejects heavier models before
+loading.
 
 ## License
 

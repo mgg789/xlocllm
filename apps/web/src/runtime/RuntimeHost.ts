@@ -11,7 +11,14 @@ import type {
   UnitState,
   UnitType,
 } from "../types";
-import { catalog, resolveModel, unitDefinitions } from "../catalog";
+import {
+  catalog,
+  resolveModel,
+  supportedModelsForCapabilities,
+  supportsCpuFallback,
+  supportsReasoning,
+  unitDefinitions,
+} from "../catalog";
 
 type RuntimeInstance = {
   model: ModelSpec;
@@ -20,6 +27,8 @@ type RuntimeInstance = {
   active: boolean;
   installed: boolean;
   status: UnitState["status"];
+  reasoning?: boolean | null;
+  options?: Record<string, unknown>;
   progress?: number;
   error?: string;
 };
@@ -37,6 +46,7 @@ export class RuntimeHost {
   private installing = false;
   private installProgress = 0;
   private running = false;
+  private webgpuAvailable = Boolean((navigator as Navigator & { gpu?: unknown }).gpu);
   private npuAvailable = false;
   private npu: NpuState = { status: "unavailable", reason: "WebNN probe has not completed" };
   private requests: RuntimeRequestState = { processing: 0, queued: 0 };
@@ -52,13 +62,17 @@ export class RuntimeHost {
 
   snapshot(): RuntimeSnapshot {
     const models = [...this.instances.values()].map((instance) => this.toRuntimeModelState(instance));
+    const catalogModels = this.supportedCatalogModels();
     return {
       units: unitDefinitions.map((unit) => this.unitState(unit.type)),
       models,
       logs: this.logs.slice(-200),
       metrics: this.metrics(),
       npu: this.npu,
+      capabilities: this.capabilities(catalogModels.length),
       requests: { ...this.requests },
+      catalogModels,
+      catalogModelCount: catalog.models.length,
       installProgress: this.installProgress,
       installing: this.installing,
       running: this.running,
@@ -66,6 +80,7 @@ export class RuntimeHost {
   }
 
   addModel(model: ModelSpec, active = true): RuntimeModelState {
+    this.assertModelSupported(model);
     const current = this.instances.get(model.modelId);
     if (current) {
       current.active = active;
@@ -120,6 +135,8 @@ export class RuntimeHost {
         return this.status();
       case "set_active":
         return this.setActiveFromRpc(request.payload ?? {});
+      case "configure_unit":
+        return this.configureUnitFromRpc(request.payload ?? {});
       case "delete_model":
         return this.deleteModel(request.payload?.unit, request.payload?.model);
       case "delete_all_models":
@@ -256,8 +273,8 @@ export class RuntimeHost {
       ok: true,
       connected: true,
       ...snapshot,
-      catalogModels: catalog.models,
-      catalogModelCount: catalog.models.length,
+      catalogModels: snapshot.catalogModels,
+      catalogModelCount: snapshot.catalogModelCount,
     };
   }
 
@@ -314,12 +331,15 @@ export class RuntimeHost {
       }
       const instance = await this.getInstanceOrLoad("LLM", payload.model);
       const messages = payload.messages ?? [{ role: "user", content: payload.prompt ?? "" }];
+      const reasoning = this.resolveReasoning(instance, payload);
       if (instance.model.runtime === "mlc" && instance.engine?.chat?.completions?.create) {
         const stream = await instance.engine.chat.completions.create({
-        ...payload,
-        model: this.backendModelId(instance.model),
-        messages,
-        stream: true,
+          ...payload,
+          ...instance.options,
+          model: this.backendModelId(instance.model),
+          messages: this.messagesWithReasoningMarker(instance.model, messages, reasoning),
+          extra_body: this.extraBodyWithReasoning(payload.extra_body, reasoning),
+          stream: true,
         });
         let content = "";
         for await (const chunk of stream) {
@@ -339,43 +359,96 @@ export class RuntimeHost {
   }
 
   private async inferImpl(endpoint: string, payload: any): Promise<any> {
-    if (endpoint === "chat.completions") return this.chat(payload);
-    if (endpoint === "responses") return this.responses(payload);
-    if (endpoint === "embeddings") return this.embeddings(payload);
-    if (endpoint === "rerank") return this.rerank(payload);
-    if (endpoint === "translate") return this.translate(payload);
-    if (endpoint === "tts") return this.tts(payload);
-    if (endpoint === "image.classify") return this.runPipeline("image-classification", payload.image, payload.options);
-    if (endpoint === "image.detect") return this.runPipeline("object-detection", payload.image, payload.options);
-    if (endpoint === "image.segment") return this.runPipeline("image-segmentation", payload.image, payload.options);
-    if (endpoint === "depth") return this.runPipeline("depth-estimation", payload.image, payload.options);
-    if (endpoint === "image-to-text") return this.runPipeline("vlm", payload.image, payload.options);
-    if (endpoint === "asr") return this.runPipeline("asr", payload.audio, payload.options);
-    if (endpoint === "zero-shot-image") {
-      const instance = this.requireInstance("zero-shot-image");
-      return instance.pipeline(payload.image, payload.labels ?? payload.candidate_labels ?? []);
+    const route = normalizeEndpoint(endpoint);
+    switch (route) {
+      case "chat.completions":
+      case "chat":
+        return this.chat(payload);
+      case "responses":
+        return this.responses(payload);
+      case "embeddings":
+      case "embedding":
+        return this.embeddings(payload);
+      case "rerank":
+      case "reranker":
+        return this.rerank(payload);
+      case "translate":
+      case "translator":
+        return this.translate(payload);
+      case "tts":
+        return this.tts(payload);
+      case "image.classify":
+      case "image-classification":
+        return this.classification("image-classification", imageInput(payload), payload);
+      case "image.detect":
+      case "object-detection":
+        return this.detection("object-detection", imageInput(payload), payload);
+      case "image.segment":
+      case "image-segmentation":
+        return this.runPipelineResult("image-segmentation", imageInput(payload), payload, "segments");
+      case "depth":
+      case "depth-estimation":
+        return this.runPipelineResult("depth-estimation", imageInput(payload), payload, "depth");
+      case "image-to-text":
+      case "vlm":
+      case "ocr":
+        return this.generatedText(payload, route === "ocr" ? "ocr" : "vlm", imageInput(payload));
+      case "asr":
+      case "speech-to-text":
+        return this.speechToText(payload);
+      case "zero-shot-image":
+        return this.zeroShotImage(payload);
+      case "language-id":
+        return this.classification("language-id", audioInput(payload), payload);
+      case "audio-classification":
+      case "audio.classify":
+        return this.classification("audio-classification", audioInput(payload), payload);
+      case "document-layout":
+        return this.detection("document-layout", imageInput(payload), payload);
+      case "table-detection":
+        return this.detection("table-detection", imageInput(payload), payload);
+      case "document-qa":
+        return this.documentQuestionAnswering(payload);
+      case "text-classification":
+      case "text.classify":
+        return this.classification("text-classification", textInput(payload), payload);
+      case "ner":
+      case "token-classification":
+        return this.runPipelineResult("ner", textInput(payload), payload, "entities");
+      case "zero-shot-text":
+      case "zero-shot-classification":
+        return this.zeroShotText(payload);
+      case "summarization":
+      case "summarize":
+        return this.generatedText(payload, "summarization", textInput(payload), "summary");
+      case "text2text":
+      case "text2text-generation":
+        return this.generatedText(payload, "text2text", textInput(payload), "text");
+      case "code":
+      case "code.embed":
+        return this.code(payload);
+      default:
+        throw new Error(`Unsupported inference endpoint: ${endpoint}`);
     }
-    throw new Error(`Unsupported inference endpoint: ${endpoint}`);
   }
 
   private async chat(payload: any): Promise<any> {
     const instance = await this.getInstanceOrLoad("LLM", payload.model);
     const messages = payload.messages ?? [{ role: "user", content: payload.prompt ?? "" }];
+    const reasoning = this.resolveReasoning(instance, payload);
     if (instance.model.runtime === "mlc" && instance.engine?.chat?.completions?.create) {
       const result = await instance.engine.chat.completions.create({
         ...payload,
+        ...instance.options,
         model: this.backendModelId(instance.model),
-        messages,
+        messages: this.messagesWithReasoningMarker(instance.model, messages, reasoning),
+        extra_body: this.extraBodyWithReasoning(payload.extra_body, reasoning),
         stream: false,
       });
       return { content: result?.choices?.[0]?.message?.content ?? "", raw: result };
     }
     if (!instance.pipeline) throw new Error("LLM pipeline is not loaded");
-    const output = await instance.pipeline(messages, {
-      max_new_tokens: payload.max_tokens ?? payload.max_completion_tokens ?? 256,
-      temperature: payload.temperature ?? 0.7,
-      do_sample: (payload.temperature ?? 0.7) > 0,
-    });
+    const output = await instance.pipeline(messages, this.generationOptions(instance, payload, reasoning));
     return { content: extractGeneratedText(output) };
   }
 
@@ -421,10 +494,114 @@ export class RuntimeHost {
 
   private async runPipeline(unit: UnitType, input: any, options?: any): Promise<any> {
     const instance = await this.getInstanceOrLoad(unit, options?.model);
-    return instance.pipeline(input, options ?? {});
+    return instance.pipeline(input, this.pipelineCallOptions(instance, options));
+  }
+
+  private async runPipelineResult(unit: UnitType, input: any, payload: any, key: string): Promise<any> {
+    const result = await this.runPipeline(unit, input, pipelinePayloadOptions(payload));
+    return { [key]: normalizeArrayResult(result), raw: result };
+  }
+
+  private async classification(unit: UnitType, input: any, payload: any): Promise<any> {
+    const result = await this.runPipeline(unit, input, pipelinePayloadOptions(payload));
+    return { labels: normalizeArrayResult(result), raw: result };
+  }
+
+  private async detection(unit: UnitType, input: any, payload: any): Promise<any> {
+    const result = await this.runPipeline(unit, input, pipelinePayloadOptions(payload));
+    return { boxes: normalizeArrayResult(result), raw: result };
+  }
+
+  private async generatedText(payload: any, unit: UnitType, input: any, key = "text"): Promise<any> {
+    const result = await this.runPipeline(unit, input, pipelinePayloadOptions(payload));
+    return { [key]: extractGeneratedText(result), raw: result };
+  }
+
+  private async speechToText(payload: any): Promise<any> {
+    const result = await this.runPipeline("asr", audioInput(payload), pipelinePayloadOptions(payload));
+    return { text: extractGeneratedText(result), chunks: Array.isArray(result?.chunks) ? result.chunks : undefined, raw: result };
+  }
+
+  private async zeroShotImage(payload: any): Promise<any> {
+    const instance = await this.getInstanceOrLoad("zero-shot-image", payload.model);
+    const labels = labelsInput(payload);
+    const result = await instance.pipeline(imageInput(payload), labels, this.pipelineCallOptions(instance, payload.options));
+    return { labels: normalizeArrayResult(result), raw: result };
+  }
+
+  private async zeroShotText(payload: any): Promise<any> {
+    const instance = await this.getInstanceOrLoad("zero-shot-text", payload.model);
+    const result = await instance.pipeline(textInput(payload), labelsInput(payload), this.pipelineCallOptions(instance, payload.options));
+    return { labels: normalizeArrayResult(result), raw: result };
+  }
+
+  private async documentQuestionAnswering(payload: any): Promise<any> {
+    const instance = await this.getInstanceOrLoad("document-qa", payload.model);
+    const options = this.pipelineCallOptions(instance, payload.options);
+    const image = imageInput(payload);
+    const question = String(payload.question ?? payload.query ?? "");
+    if (!question) throw new Error("document-qa requires question or query");
+    let result: any;
+    try {
+      result = await instance.pipeline(image, question, options);
+    } catch {
+      result = await instance.pipeline({ image, question }, options);
+    }
+    return { answers: normalizeArrayResult(result), raw: result };
+  }
+
+  private async code(payload: any): Promise<any> {
+    const result = await this.runPipeline("code", textInput(payload), pipelinePayloadOptions(payload));
+    return { features: typeof result?.tolist === "function" ? result.tolist() : result, raw: result };
+  }
+
+  private generationOptions(instance: RuntimeInstance, payload: any, reasoning: boolean | null): Record<string, unknown> {
+    const options: Record<string, unknown> = {
+      ...(instance.options ?? {}),
+      ...(payload.options ?? {}),
+      max_new_tokens: payload.max_tokens ?? payload.max_completion_tokens ?? 256,
+      temperature: payload.temperature ?? 0.7,
+      do_sample: (payload.temperature ?? 0.7) > 0,
+    };
+    if (reasoning !== null) {
+      options.chat_template_kwargs = {
+        ...((instance.options?.chat_template_kwargs as Record<string, unknown> | undefined) ?? {}),
+        ...((payload.options?.chat_template_kwargs as Record<string, unknown> | undefined) ?? {}),
+        ...(payload.chat_template_kwargs ?? {}),
+        ...(payload.extra_body?.chat_template_kwargs ?? {}),
+        enable_thinking: reasoning,
+      };
+    }
+    return options;
+  }
+
+  private pipelineCallOptions(instance: RuntimeInstance, options?: any): Record<string, unknown> {
+    const result: Record<string, unknown> = { ...(instance.options ?? {}), ...(options ?? {}) };
+    delete result.model;
+    return result;
+  }
+
+  private loadedInstance(
+    model: ModelSpec,
+    target: RuntimeInstance | undefined,
+    values: Partial<RuntimeInstance>,
+  ): RuntimeInstance {
+    return {
+      model,
+      active: target?.active ?? true,
+      installed: values.installed ?? true,
+      status: values.status ?? "running",
+      reasoning: target?.reasoning,
+      options: target?.options ?? {},
+      engine: values.engine,
+      pipeline: values.pipeline,
+      progress: target?.progress,
+      error: target?.error,
+    };
   }
 
   private async loadModel(model: ModelSpec, installOnly: boolean, target?: RuntimeInstance, batch?: InstallBatch): Promise<RuntimeInstance> {
+    this.assertModelSupported(model);
     if (model.runtime === "mlc") {
       const mlc = await import("@mlc-ai/web-llm");
       const backendModelId = this.backendModelId(model);
@@ -440,9 +617,9 @@ export class RuntimeHost {
       });
       if (installOnly && engine?.unload) {
         await engine.unload();
-        return { model, active: target?.active ?? true, installed: true, status: "ready" };
+        return this.loadedInstance(model, target, { installed: true, status: "ready" });
       }
-      return { model, engine, active: target?.active ?? true, installed: true, status: "running" };
+      return this.loadedInstance(model, target, { engine, installed: true, status: "running" });
     }
 
     const hf = await import("@huggingface/transformers");
@@ -454,19 +631,23 @@ export class RuntimeHost {
       }
       if (installOnly && pipe?.dispose) {
         await pipe.dispose();
-        return { model, active: target?.active ?? true, installed: true, status: "ready" };
+        return this.loadedInstance(model, target, { installed: true, status: "ready" });
       }
-      return { model, pipeline: pipe, active: target?.active ?? true, installed: true, status: "running" };
+      return this.loadedInstance(model, target, { pipeline: pipe, installed: true, status: "running" });
     } catch (error) {
       if (!preferNpu) throw error;
-      this.npu = { status: "fallback", backend: "webgpu", reason: String(error instanceof Error ? error.message : error) };
-      this.log("warn", `${model.label}: WebNN/NPU load failed, falling back to WebGPU`);
+      this.npu = {
+        status: "fallback",
+        backend: this.webgpuAvailable ? "webgpu" : "wasm",
+        reason: String(error instanceof Error ? error.message : error),
+      };
+      this.log("warn", `${model.label}: WebNN/NPU load failed, falling back to ${this.webgpuAvailable ? "WebGPU" : "WASM"}`);
       const pipe = await hf.pipeline(model.task as any, this.backendModelId(model), this.pipelineOptions(model, false, target, batch) as any);
       if (installOnly && pipe?.dispose) {
         await pipe.dispose();
-        return { model, active: target?.active ?? true, installed: true, status: "ready" };
+        return this.loadedInstance(model, target, { installed: true, status: "ready" });
       }
-      return { model, pipeline: pipe, active: target?.active ?? true, installed: true, status: "running" };
+      return this.loadedInstance(model, target, { pipeline: pipe, installed: true, status: "running" });
     }
   }
 
@@ -494,15 +675,16 @@ export class RuntimeHost {
     }
     return units.map((unit) => {
       const model = this.requireModel(unit.type, unit.model);
-      this.ensureRuntimeModel(model, true);
+      this.ensureRuntimeModel(model, true, unit);
       return model;
     });
   }
 
-  private ensureRuntimeModel(model: ModelSpec, active: boolean): RuntimeInstance {
+  private ensureRuntimeModel(model: ModelSpec, active: boolean, request?: RuntimeUnitRequest): RuntimeInstance {
     const current = this.instances.get(model.modelId);
     if (current) {
       current.active = active || current.active;
+      this.applyUnitRequest(current, request);
       return current;
     }
     const instance: RuntimeInstance = {
@@ -510,7 +692,9 @@ export class RuntimeHost {
       active,
       installed: false,
       status: "selected",
+      options: {},
     };
+    this.applyUnitRequest(instance, request);
     this.instances.set(model.modelId, instance);
     return instance;
   }
@@ -523,6 +707,7 @@ export class RuntimeHost {
   private requireModel(unit: string, modelName: string): ModelSpec {
     const model = resolveModel(unit, modelName);
     if (!model) throw new Error(`Model not found for unit=${unit} model=${modelName}`);
+    this.assertModelSupported(model);
     return model;
   }
 
@@ -536,6 +721,7 @@ export class RuntimeHost {
       );
     });
     if (!model) throw new Error(`Model not found: ${modelName}`);
+    this.assertModelSupported(model);
     return model;
   }
 
@@ -553,6 +739,7 @@ export class RuntimeHost {
     if (modelName) {
       const model = resolveModel(unit, modelName);
       if (model) {
+        this.assertModelSupported(model);
         const current = this.instances.get(model.modelId);
         if (current?.status === "running") return current;
         this.log("info", `Auto-loading ${model.label} for ${unit}`);
@@ -594,6 +781,50 @@ export class RuntimeHost {
     return this.status();
   }
 
+  private configureUnitFromRpc(payload: { unit?: RuntimeUnitRequest; unit_id?: string; reasoning?: boolean | null; options?: Record<string, unknown> }): any {
+    const request = payload.unit;
+    const reasoning = request && "reasoning" in request ? request.reasoning : payload.reasoning;
+    let instance: RuntimeInstance | undefined;
+    if (request?.type && request.model) {
+      const model = this.requireModel(request.type, request.model);
+      instance = this.ensureRuntimeModel(model, true, {
+        ...request,
+        reasoning,
+        options: { ...(request.options ?? {}), ...(payload.options ?? {}) },
+      });
+    } else if (payload.unit_id) {
+      const modelId = payload.unit_id.includes(":") ? payload.unit_id.split(":").slice(1).join(":") : payload.unit_id;
+      instance = this.instances.get(modelId) ?? [...this.instances.values()].find((candidate) => candidate.model.unit === payload.unit_id);
+    }
+    if (!instance) throw new Error("Unit is not present in runtime");
+    this.applyUnitRequest(instance, {
+      type: instance.model.unit,
+      model: instance.model.modelId,
+      reasoning,
+      options: { ...(request?.options ?? {}), ...(payload.options ?? {}) },
+    });
+    this.log("info", `${instance.model.label} runtime options updated`);
+    this.emit();
+    return this.status();
+  }
+
+  private applyUnitRequest(instance: RuntimeInstance, request?: RuntimeUnitRequest): void {
+    if (!request) return;
+    if (request.reasoning !== undefined) {
+      this.setInstanceReasoning(instance, request.reasoning);
+    }
+    if (request.options) {
+      instance.options = { ...(instance.options ?? {}), ...request.options };
+    }
+  }
+
+  private setInstanceReasoning(instance: RuntimeInstance, reasoning: boolean | null): void {
+    if (reasoning !== null && !supportsReasoning(instance.model)) {
+      throw new Error(`${instance.model.label} does not advertise reasoning control`);
+    }
+    instance.reasoning = reasoning;
+  }
+
   private pipelineOptions(model: ModelSpec, preferNpu: boolean, target?: RuntimeInstance, batch?: InstallBatch): Record<string, unknown> {
     const options: Record<string, unknown> = {
       ...this.modelOptions(model, preferNpu),
@@ -610,7 +841,7 @@ export class RuntimeHost {
 
   private modelOptions(model: ModelSpec, preferNpu: boolean): Record<string, unknown> {
     const options: Record<string, unknown> = {
-      device: preferNpu ? "webnn-npu" : "webgpu",
+      device: preferNpu ? "webnn-npu" : this.runtimeBackend(model),
     };
     if (model.dtype && model.dtype !== "auto") {
       options.dtype = model.dtype;
@@ -620,6 +851,84 @@ export class RuntimeHost {
 
   private backendModelId(model: ModelSpec): string {
     return model.backendModelId ?? model.modelId;
+  }
+
+  private resolveReasoning(instance: RuntimeInstance, payload: any): boolean | null {
+    const candidates = [
+      payload.reasoning,
+      payload.enable_thinking,
+      payload.enableThinking,
+      payload.chat_template_kwargs?.enable_thinking,
+      payload.extra_body?.reasoning,
+      payload.extra_body?.enable_thinking,
+      payload.extra_body?.chat_template_kwargs?.enable_thinking,
+      instance.reasoning,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate === "boolean") {
+        if (!supportsReasoning(instance.model)) {
+          throw new Error(`${instance.model.label} does not advertise reasoning control`);
+        }
+        return candidate;
+      }
+      if (candidate === null) return null;
+    }
+    return null;
+  }
+
+  private extraBodyWithReasoning(extraBody: any, reasoning: boolean | null): Record<string, unknown> | undefined {
+    if (reasoning === null) return extraBody;
+    return {
+      ...(extraBody ?? {}),
+      reasoning,
+      chat_template_kwargs: {
+        ...(extraBody?.chat_template_kwargs ?? {}),
+        enable_thinking: reasoning,
+      },
+    };
+  }
+
+  private messagesWithReasoningMarker(model: ModelSpec, messages: any[], reasoning: boolean | null): any[] {
+    if (reasoning === null || !isQwenReasoningModel(model)) return messages;
+    const marker = reasoning ? "/think" : "/no_think";
+    if (messages.length === 0) return [{ role: "user", content: marker }];
+    const index = messages.findIndex((message) => message.role === "system");
+    if (index >= 0) {
+      return messages.map((message, current) =>
+        current === index ? { ...message, content: `${String(message.content ?? "")}\n${marker}` } : message,
+      );
+    }
+    return [{ role: "system", content: marker }, ...messages];
+  }
+
+  private runtimeBackend(model: ModelSpec): "webgpu" | "wasm" {
+    if (this.webgpuAvailable) return "webgpu";
+    if (model.runtime === "transformers" && supportsCpuFallback(model)) return "wasm";
+    throw new Error(`${model.label} requires WebGPU. Use xlocllm.models(webgpu=False) to list CPU/WASM-capable models.`);
+  }
+
+  private assertModelSupported(model: ModelSpec): void {
+    if (model.runtime === "mlc" && !this.webgpuAvailable) {
+      throw new Error(`${model.label} uses WebLLM/MLC and requires WebGPU`);
+    }
+    if (!this.webgpuAvailable && !supportsCpuFallback(model)) {
+      throw new Error(`${model.label} is not available without WebGPU`);
+    }
+  }
+
+  private supportedCatalogModels(): ModelSpec[] {
+    return supportedModelsForCapabilities(this.webgpuAvailable);
+  }
+
+  private capabilities(modelCount: number): RuntimeSnapshot["capabilities"] {
+    return {
+      webgpu: this.webgpuAvailable,
+      webnn: this.npuAvailable,
+      cpuFallback: !this.webgpuAvailable,
+      backend: this.webgpuAvailable ? "webgpu" : "wasm",
+      modelCount,
+      catalogModelCount: catalog.models.length,
+    };
   }
 
   private updateInstallProgress(target: RuntimeInstance | undefined, rawProgress: number, batch?: InstallBatch): void {
@@ -659,7 +968,11 @@ export class RuntimeHost {
       this.npu = { status: "active", backend: "webnn-npu", reason: "WebNN NPU context is available" };
     } catch (error) {
       this.npuAvailable = false;
-      this.npu = { status: "fallback", backend: "webgpu", reason: String(error instanceof Error ? error.message : error) };
+      this.npu = {
+        status: "fallback",
+        backend: this.webgpuAvailable ? "webgpu" : "wasm",
+        reason: String(error instanceof Error ? error.message : error),
+      };
     }
     this.emit();
   }
@@ -689,6 +1002,9 @@ export class RuntimeHost {
       selectedModelId: selected?.model.modelId,
       active: models.some((instance) => instance.active),
       status,
+      reasoning: selected?.reasoning,
+      supportsReasoning: selected ? supportsReasoning(selected.model) : false,
+      options: selected?.options,
       progress: selected?.progress,
       error: selected?.error,
     };
@@ -702,6 +1018,9 @@ export class RuntimeHost {
       active: instance.active,
       installed: instance.installed,
       status: instance.status,
+      reasoning: instance.reasoning,
+      supportsReasoning: supportsReasoning(instance.model),
+      options: instance.options,
       progress: instance.progress,
       error: instance.error,
     };
@@ -737,13 +1056,63 @@ function normalize(value: string): string {
   return value.trim().toLowerCase().replace(/[_\s]+/g, "-");
 }
 
+function normalizeEndpoint(value: string): string {
+  return value.trim().toLowerCase().replace(/[\/_]/g, ".");
+}
+
+function pipelinePayloadOptions(payload: any): Record<string, unknown> {
+  return {
+    ...(payload.options ?? {}),
+    ...(payload.model ? { model: payload.model } : {}),
+  };
+}
+
+function imageInput(payload: any): any {
+  const value = payload.image ?? payload.input ?? payload.url;
+  if (value === undefined || value === null || value === "") throw new Error("image input is required");
+  return value;
+}
+
+function audioInput(payload: any): any {
+  const value = payload.audio ?? payload.input ?? payload.url;
+  if (value === undefined || value === null || value === "") throw new Error("audio input is required");
+  return value;
+}
+
+function textInput(payload: any): string {
+  const value = payload.text ?? payload.input ?? payload.prompt ?? payload.query;
+  if (value === undefined || value === null) throw new Error("text input is required");
+  return String(value);
+}
+
+function labelsInput(payload: any): string[] {
+  const labels = payload.labels ?? payload.candidate_labels ?? payload.candidateLabels;
+  if (!Array.isArray(labels) || labels.length === 0) throw new Error("labels or candidate_labels are required");
+  return labels.map((label) => String(label));
+}
+
+function normalizeArrayResult(result: any): any[] {
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result?.data)) return result.data;
+  if (Array.isArray(result?.labels)) return result.labels;
+  if (Array.isArray(result?.entities)) return result.entities;
+  return result === undefined || result === null ? [] : [result];
+}
+
 function extractGeneratedText(output: any): string {
   if (typeof output === "string") return output;
   if (Array.isArray(output)) {
     const first = output[0];
     if (typeof first?.generated_text === "string") return first.generated_text;
+    if (typeof first?.summary_text === "string") return first.summary_text;
+    if (typeof first?.translation_text === "string") return first.translation_text;
+    if (typeof first?.text === "string") return first.text;
     if (Array.isArray(first?.generated_text)) return first.generated_text.at(-1)?.content ?? JSON.stringify(output);
   }
+  if (typeof output?.generated_text === "string") return output.generated_text;
+  if (typeof output?.summary_text === "string") return output.summary_text;
+  if (typeof output?.translation_text === "string") return output.translation_text;
+  if (typeof output?.text === "string") return output.text;
   return JSON.stringify(output);
 }
 
@@ -752,6 +1121,11 @@ function serializeBinaryLike(result: any): any {
     return { audio: Array.from(result.audio), sampling_rate: result.sampling_rate };
   }
   return result;
+}
+
+function isQwenReasoningModel(model: ModelSpec): boolean {
+  const haystack = [model.modelId, model.label, ...(model.aliases ?? []), ...(model.tags ?? [])].join(" ").toLowerCase();
+  return haystack.includes("qwen3") || haystack.includes("qwen3.5") || haystack.includes("qwen3_5");
 }
 
 function splitText(text: string): string[] {
