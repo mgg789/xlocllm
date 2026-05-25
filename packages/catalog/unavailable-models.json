@@ -1,0 +1,99 @@
+{
+  "generatedAt": "2026-05-25T16:25:07Z",
+  "requestedUnique": 215,
+  "addedTotal": 215,
+  "addedFromRequest": 200,
+  "unavailableTotal": 15,
+  "unavailable": [
+    {
+      "modelId": "azherali/CodeGenDetect-CodeBert",
+      "unit": "code",
+      "taskGroup": "Code",
+      "reason": "no browser-ready ONNX/WebGPU artifact detected"
+    },
+    {
+      "modelId": "azherali/CodeGenDetect-CodeBert_Lora",
+      "unit": "code",
+      "taskGroup": "Code",
+      "reason": "no browser-ready ONNX/WebGPU artifact detected"
+    },
+    {
+      "modelId": "hexgrad/Kokoro-82M",
+      "unit": "tts",
+      "taskGroup": "Audio",
+      "reason": "no browser-ready ONNX/WebGPU artifact detected"
+    },
+    {
+      "modelId": "HuggingFaceTB/SmolVLM-256M-Instruct-WebGPU",
+      "unit": "vlm",
+      "taskGroup": "VLM",
+      "reason": "HF API returned 401"
+    },
+    {
+      "modelId": "microsoft/codebert-base",
+      "unit": "code",
+      "taskGroup": "Code",
+      "reason": "no browser-ready ONNX/WebGPU artifact detected"
+    },
+    {
+      "modelId": "mrm8488/codebert-base-finetuned-detect-insecure-code",
+      "unit": "code",
+      "taskGroup": "Code",
+      "reason": "no browser-ready ONNX/WebGPU artifact detected"
+    },
+    {
+      "modelId": "nomic-ai/CodeRankEmbed",
+      "unit": "code",
+      "taskGroup": "Code",
+      "reason": "no browser-ready ONNX/WebGPU artifact detected"
+    },
+    {
+      "modelId": "omoured/YOLOv10-Document-Layout-Analysis",
+      "unit": "document-layout",
+      "taskGroup": "OCR",
+      "reason": "no browser-ready ONNX/WebGPU artifact detected"
+    },
+    {
+      "modelId": "Shoriful025/codebert_vulnerability_scanner",
+      "unit": "code",
+      "taskGroup": "Code",
+      "reason": "no browser-ready ONNX/WebGPU artifact detected"
+    },
+    {
+      "modelId": "Xenova/deberta-v3-small-zeroshot-v1.1-all-33",
+      "unit": "zero-shot-text",
+      "taskGroup": "Text",
+      "reason": "HF API returned 401"
+    },
+    {
+      "modelId": "Xenova/distilbart-mnli-12-1",
+      "unit": "zero-shot-text",
+      "taskGroup": "Text",
+      "reason": "HF API returned 401"
+    },
+    {
+      "modelId": "Xenova/mms-tts-ita",
+      "unit": "tts",
+      "taskGroup": "Audio",
+      "reason": "HF API returned 401"
+    },
+    {
+      "modelId": "Xenova/opus-mt-en-ja",
+      "unit": "translator",
+      "taskGroup": "Translation",
+      "reason": "HF API returned 401"
+    },
+    {
+      "modelId": "Xenova/opus-mt-en-ko",
+      "unit": "translator",
+      "taskGroup": "Translation",
+      "reason": "HF API returned 401"
+    },
+    {
+      "modelId": "yasminerekik/codebert_vuln_model_cpu",
+      "unit": "code",
+      "taskGroup": "Code",
+      "reason": "no browser-ready ONNX/WebGPU artifact detected"
+    }
+  ]
+}

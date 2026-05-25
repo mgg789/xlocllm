@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xlocllm"
+version = "1.0.0"
+description = "Local browser-backed LLM and multimodal inference bridge"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "xlocllm contributors" }
+]
+keywords = ["llm", "webgpu", "openai", "transformers", "mlc", "local-ai"]
+dependencies = [
+  "fastapi>=0.124.0",
+  "uvicorn[standard]>=0.38.0",
+  "pydantic>=2.12.0",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/mgg789/xlocllm"
+Repository = "https://github.com/mgg789/xlocllm"
+Documentation = "https://github.com/mgg789/xlocllm#readme"
+Issues = "https://github.com/mgg789/xlocllm/issues"
+
+[project.optional-dependencies]
+openai = [
+  "openai>=1.0.0",
+]
+dev = [
+  "pytest>=9.0.0",
+  "ruff>=0.14.0",
+  "mypy>=1.19.0",
+  "httpx>=0.28.0",
+  "build>=1.3.0",
+  "twine>=6.2.0",
+]
+
+[project.scripts]
+xlocllm-bridge = "xlocllm._server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xlocllm"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/xlocllm/data/models.json" = "xlocllm/data/models.json"
+"src/xlocllm/py.typed" = "xlocllm/py.typed"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unused_ignores = false

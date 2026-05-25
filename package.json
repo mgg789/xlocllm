@@ -1,0 +1,15 @@
+{
+  "name": "xlocllm-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "pnpm --filter @xlocllm/web dev",
+    "build": "pnpm --filter @xlocllm/web build",
+    "lint": "pnpm --filter @xlocllm/web lint",
+    "test": "pnpm --filter @xlocllm/web test && pnpm py:test",
+    "py:test": "python -m pytest python/xlocllm/tests",
+    "py:lint": "python -m ruff check python/xlocllm/src python/xlocllm/tests",
+    "py:typecheck": "python -m mypy python/xlocllm/src"
+  }
+}
