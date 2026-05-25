@@ -1,5 +1,7 @@
 export type UnitType =
   | "LLM"
+  | "vectorstorage"
+  | "RAG"
   | "embedding"
   | "reranker"
   | "translator"
@@ -120,6 +122,7 @@ export interface RuntimeUnitRequest {
   model: string;
   reasoning?: boolean | null;
   options?: Record<string, unknown>;
+  rag?: RuntimeUnitRequest;
 }
 
 export interface RuntimeModelState {
@@ -144,6 +147,7 @@ export interface RuntimeRequestState {
 export interface RuntimeSnapshot {
   units: UnitState[];
   models: RuntimeModelState[];
+  services: RuntimeServiceState[];
   logs: LogEntry[];
   metrics: RuntimeMetrics;
   npu: NpuState;
@@ -154,6 +158,16 @@ export interface RuntimeSnapshot {
   installProgress: number;
   installing: boolean;
   running: boolean;
+}
+
+export interface RuntimeServiceState {
+  runtimeId: string;
+  type: "vectorstorage" | "RAG" | string;
+  active: boolean;
+  status: UnitStatus;
+  options?: Record<string, unknown>;
+  stats?: Record<string, unknown>;
+  error?: string;
 }
 
 export interface BrowserRpcRequest {

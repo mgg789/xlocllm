@@ -55,7 +55,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -114,7 +115,8 @@ button.icon-button.primary {
 }
 
 input,
-select {
+select,
+textarea {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -123,6 +125,13 @@ select {
   min-height: 32px;
   padding: 0 8px;
   width: 100%;
+}
+
+textarea {
+  line-height: 1.4;
+  min-height: 74px;
+  padding: 10px;
+  resize: vertical;
 }
 
 .app-shell {
@@ -888,6 +897,133 @@ select {
   margin: 0;
 }
 
+.chat-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  height: 100vh;
+  margin: 0 auto;
+  max-width: 860px;
+  min-width: 320px;
+  padding: 12px;
+}
+
+.chat-header {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 260px) auto 32px;
+  padding: 10px;
+}
+
+.chat-header h1 {
+  font-size: 18px;
+  line-height: 1;
+  margin: 0 0 4px;
+}
+
+.chat-header span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chat-toggle {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  display: inline-flex;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+}
+
+.chat-toggle input {
+  width: auto;
+}
+
+.chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 0;
+}
+
+.chat-empty {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  min-height: 45vh;
+}
+
+.chat-message {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-width: min(78%, 620px);
+  padding: 10px 12px;
+}
+
+.chat-message.user {
+  align-self: end;
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--bg);
+}
+
+.chat-message.assistant {
+  align-self: start;
+  background: var(--surface);
+}
+
+.chat-message.pending {
+  color: var(--muted);
+}
+
+.chat-message p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.chat-message small {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+  margin-top: 8px;
+}
+
+.chat-error {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  border-radius: 8px;
+  color: var(--danger);
+  font-size: 13px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+}
+
+.chat-compose {
+  align-items: end;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  padding: 8px;
+}
+
+.chat-compose button {
+  aspect-ratio: 1;
+  min-height: 42px;
+  padding: 0;
+  width: 42px;
+}
+
 @media (max-width: 1180px) {
   .dashboard-hero,
   .catalog-screen {
@@ -937,5 +1073,22 @@ select {
 
   .log {
     grid-template-columns: 72px 44px minmax(0, 1fr);
+  }
+
+  .chat-shell {
+    padding: 8px;
+  }
+
+  .chat-header {
+    grid-template-columns: 1fr 32px;
+  }
+
+  .chat-header select,
+  .chat-toggle {
+    grid-column: 1 / -1;
+  }
+
+  .chat-message {
+    max-width: 92%;
   }
 }

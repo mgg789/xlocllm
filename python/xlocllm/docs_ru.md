@@ -87,11 +87,13 @@ with xlocllm.runtime([llm]) as runtime:
 
 ## Top-Level API
 
-### `xlocllm.unit(type, model, reasoning=None, options=None)`
+### `xlocllm.unit(type, model, reasoning=None, options=None, rag=None)`
 
 Создает `Unit`, нормализуя тип и имя модели через каталог.
 `reasoning` включает или выключает thinking/reasoning для LLM-семейств, которые
 это поддерживают. `options` передается в браузерный runtime как настройки unit.
+Для LLM можно передать `rag=<RAG unit>`, тогда chat-запросы будут автоматически
+делать retrieval перед генерацией.
 
 ```python
 unit = xlocllm.unit("chat", "qwen-0.8b")
@@ -101,6 +103,33 @@ print(unit.model)  # Qwen3.5-0.8B-q4f16_1-MLC
 
 Модель можно указывать через точный `modelId`, `label` или любой alias из
 каталога.
+
+### `xlocllm.vectorstorage(name="default", backend="indexeddb", metric="cosine", persist=True, namespace="default", options=None)`
+
+Создает сервисный unit для локального vector storage. Первый production backend -
+IndexedDB в браузере. Для временного индекса используйте `persist=False` или
+`backend="memory"`. `metric`: `cosine`, `dot`, `euclidean`.
+
+```python
+store = xlocllm.vectorstorage(name="docs", namespace="kb")
+```
+
+Низкоуровневый `vectorstorage` требует готовые embeddings. Обычно удобнее
+использовать `xlocllm.rag(...)`: он сам чанкует текст, вызывает embedding model
+и пишет векторные записи.
+
+### `xlocllm.rag(emb, rerank=None, store=None, name="default", chunk_size=800, chunk_overlap=120, top_k=5, candidate_k=30, score_threshold=None, options=None)`
+
+Создает высокоуровневый RAG unit. `emb` должен быть embedding unit. `rerank`
+опционален и должен быть reranker unit. Если `store` не указан, xlocllm создаст
+IndexedDB store `<name>-store`.
+
+```python
+emb = xlocllm.unit("embedding", "multilingual-e5-small")
+rerank = xlocllm.unit("reranker", "bge-reranker-base")
+rag = xlocllm.rag(emb=emb, rerank=rerank, name="kb")
+llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b-fp32", rag=rag)
+```
 
 ### `xlocllm.runtime(units, port=1146, bridge=None, runtime_id=None)`
 
@@ -205,6 +234,7 @@ llm_fit = xlocllm.benchmark("LLM")
 - `unit.model_info`
 - `unit.reasoning`
 - `unit.options`
+- `unit.rag` - подключенный RAG unit для LLM, если настроен
 - `unit.supports_reasoning`
 
 Методы:
@@ -223,6 +253,12 @@ llm_fit = xlocllm.benchmark("LLM")
 - `unit.hibernate()`
 - `unit.heatup()`
 - `unit.invoke(endpoint, payload, timeout=None)`
+- `unit.add(documents, ids=None, metadatas=None, embeddings=None, **params)` - для `RAG` и `vectorstorage`
+- `unit.search(query=None, embedding=None, top_k=None, filter=None, **params)` - для `RAG` и `vectorstorage`
+- `unit.delete(ids=None, filter=None, **params)` - удалить документы RAG или vector records
+- `unit.clear(**params)` - очистить namespace RAG/vector store
+- `unit.stats()` - статистика RAG/vector storage
+- `unit.reindex(**params)` - переэмбеддить существующие RAG chunks
 
 ## Runtime API
 
@@ -256,15 +292,65 @@ llm_fit = xlocllm.benchmark("LLM")
 - `runtime.logs(limit=200)`
 - `runtime.invoke(endpoint, payload, timeout=None)`
 - `runtime.client(api_key="xlocllm", **kwargs)`
-- `runtime.chat(prompt=None, messages=None, model=None, **params)`
+- `runtime.chat(prompt=None, messages=None, model=None, use_rag=None, **params)`
 - `runtime.embed(input, model=None)`
 - `runtime.open()`
+- `runtime.chatui(model=None, session="default", use_rag=True, open_browser=True, block=True, width=760, height=860)`
 - `runtime.close()`
 - `runtime.wait_ready(timeout=None, require_browser=False)`
 
 `runtime.remove_unit()` принимает `unit.id`, `modelId` или тип unit. Если runtime
 запущен и `delete_cache=False`, SDK попросит браузер деактивировать модель. Если
 `delete_cache=True`, SDK дополнительно запросит очистку cache модели.
+
+## RAG и Vector Storage
+
+RAG исполняется внутри связанного browser runtime:
+
+1. `rag.add(...)` чанкует документы в браузере.
+2. Настроенный embedding unit считает embedding для каждого chunk.
+3. Векторы и metadata сохраняются в IndexedDB.
+4. `rag.search(...)` эмбеддит query, ищет кандидаты, опционально rerank-ит их и
+   возвращает `results` плюс собранный `context`.
+
+```python
+emb = xlocllm.unit("embedding", "multilingual-e5-small")
+store = xlocllm.vectorstorage("support-kb")
+rag = xlocllm.rag(emb=emb, store=store, name="support")
+llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b-fp32", rag=rag)
+
+with xlocllm.runtime([llm]) as rt:
+    rt.run()
+    rag.add(["Возврат обрабатывается в течение 5 рабочих дней."], ids=["refunds"])
+    print(rag.search("Сколько занимает возврат?", top_k=3))
+    print(rt.chat("Сколько занимает возврат?"))
+    print(rt.chat("Ответь без локальных документов", use_rag=False))
+```
+
+Если LLM создан с `rag=...`, `runtime.chat(...)`,
+`/xlocllm/v1/invoke/chat.completions` и OpenAI-compatible
+`/v1/chat/completions` автоматически делают retrieval, пока не передан
+`use_rag=False`. SDK-ответ содержит `raw["rag"]` и `rag`, если retrieval
+использовался. OpenAI-compatible ответ кладет эти данные в extension field
+`xlocllm.rag`.
+
+Низкоуровневые endpoints через `runtime.invoke(...)`:
+
+- `vector.add`, `vector.search`, `vector.delete`, `vector.clear`, `vector.stats`
+- `rag.add`, `rag.search`, `rag.delete`, `rag.clear`, `rag.reindex`, `rag.stats`
+
+## Chat UI
+
+`runtime.chatui()` запускает runtime при необходимости и открывает отдельное
+окно чата, которое ходит в bridge по HTTP. По умолчанию метод блокирует скрипт,
+чтобы `with xlocllm.runtime(...)` не закрыл bridge сразу после открытия чата.
+Если нужен только `WindowHandle`, передайте `block=False`.
+
+```python
+with xlocllm.runtime([llm]) as rt:
+    rt.run()
+    rt.chatui(session="demo", use_rag=True)
+```
 
 ## Bridge API
 
@@ -325,6 +411,12 @@ llm_fit = xlocllm.benchmark("LLM")
 | `summarization`, `summarize` | `summarization` | `text`/`input` | `{summary, raw}` |
 | `text2text`, `text2text-generation` | `text2text` | `text`/`input` | `{text, raw}` |
 | `code`, `code.embed` | `code` | `text`/`input` | `{features, raw}` |
+| `vector.add` | `vectorstorage` | `unit`, `documents`, `embeddings` | `{ok, store, namespace, ids}` |
+| `vector.search` | `vectorstorage` | `unit`, `embedding` | `{ok, results}` |
+| `vector.delete`, `vector.clear`, `vector.stats` | `vectorstorage` | `unit` | mutation/stats result |
+| `rag.add` | `RAG` | `unit`, `documents` | `{ok, rag, store, ids}` |
+| `rag.search` | `RAG` | `unit`, `query` | `{ok, results, context}` |
+| `rag.delete`, `rag.clear`, `rag.reindex`, `rag.stats` | `RAG` | `unit` | mutation/stats result |
 
 Примеры:
 
@@ -359,6 +451,10 @@ client = runtime.client()  # требует optional package openai
 Bridge слушает только `127.0.0.1`. Окно браузера должно оставаться открытым,
 пока работают browser-модели. Python bridge - это локальный слой управления и
 OpenAI-compatible API; веса моделей, cache и inference исполняются в браузере.
+
+Если mini browser runtime отключился во время RPC, bridge ждет reconnect до 30
+секунд и повторяет RPC. Если mini-окно не возвращается за 30 секунд, bridge сам
+закрывается, чтобы не оставлять orphan local processes.
 
 Если WebGPU недоступен, браузерный runtime переключает подходящие
 Transformers.js модели на WASM и заранее отклоняет MLC/WebLLM или слишком
@@ -410,7 +506,9 @@ voice assistant, OCR/document intelligence и других частых зада
 
 Доступно напрямую из `xlocllm`:
 
-- `xlocllm.unit(type, model, reasoning=None, options=None) -> Unit`
+- `xlocllm.unit(type, model, reasoning=None, options=None, rag=None) -> Unit`
+- `xlocllm.vectorstorage(name="default", ...) -> Unit`
+- `xlocllm.rag(emb, rerank=None, store=None, ...) -> Unit`
 - `xlocllm.runtime(units, port=1146, bridge=None, runtime_id=None) -> Runtime`
 - `xlocllm.model(name, unit=None) -> ModelInfo`
 - `xlocllm.models(...) -> list[ModelInfo]`
@@ -455,12 +553,12 @@ voice assistant, OCR/document intelligence и других частых зада
 
 ### `Unit`
 
-`Unit` описывает одну пару capability/model.
+`Unit` описывает model-backed capability, сервисный unit или composite unit.
 
 Обычно создается так:
 
 ```python
-unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None)
+unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None, rag=None)
 ```
 
 Свойства:
@@ -470,6 +568,7 @@ unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None)
 - `model_info: ModelInfo | None` - запись каталога.
 - `reasoning: bool | None` - настройка reasoning для поддерживающих LLM.
 - `options: dict[str, Any]` - runtime options для unit.
+- `rag: Unit | None` - подключенный RAG service для LLM units.
 - `id: str` - локальный стабильный id вида `<type>:<modelId>`.
 - `label: str` - label из каталога или model id.
 - `supports_reasoning: bool` - capability из каталога.
@@ -487,7 +586,8 @@ unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None)
   Убирает unit из attached runtime без удаления browser cache.
 - `delete(delete_cache=True, bridge=None) -> dict[str, Any]`
   Если unit attached, убирает его из runtime. Если `delete_cache=True`, просит
-  bridge удалить browser cache модели.
+  bridge удалить browser cache модели. Для `RAG` и `vectorstorage`
+  `delete(ids=None, filter=None)` удаляет документы или vector records.
 - `delete_cache(bridge=None) -> dict[str, Any]`
   Удаляет browser-side cache модели через bridge.
 - `set_reasoning(enabled) -> dict[str, Any]`
@@ -506,6 +606,16 @@ unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None)
   Запускает и прогревает single-unit runtime.
 - `invoke(endpoint, payload, timeout=None) -> dict[str, Any]`
   Вызывает endpoint через single-unit runtime.
+- `add(documents, ids=None, metadatas=None, embeddings=None, **params) -> dict[str, Any]`
+  Добавляет документы в `RAG` или явные text+embedding records в `vectorstorage`.
+- `search(query=None, embedding=None, top_k=None, filter=None, **params) -> dict[str, Any]`
+  Ищет в `RAG` по текстовому query или в `vectorstorage` по готовому embedding.
+- `clear(**params) -> dict[str, Any]`
+  Очищает namespace RAG/vector store.
+- `stats() -> dict[str, Any]`
+  Возвращает статистику vector/RAG storage из browser runtime.
+- `reindex(**params) -> dict[str, Any]`
+  Переэмбеддит существующие RAG chunks текущей embedding model.
 
 ### `Runtime`
 
@@ -529,7 +639,7 @@ Runtime(units, *, port=1146, bridge=None, runtime_id=None)
 - `running: bool` - Python-side флаг запуска.
 - `base_url: str` - base URL bridge, например `http://127.0.0.1:1146`.
 - `url: str` - OpenAI-compatible URL, например `http://127.0.0.1:1146/v1`.
-- `unit_requests: list[UnitRequest]` - payload objects для всех units.
+- `unit_requests: list[dict[str, Any]]` - payload objects для всех units.
 
 Методы:
 
@@ -572,12 +682,15 @@ Runtime(units, *, port=1146, bridge=None, runtime_id=None)
 - `client(api_key="xlocllm", **kwargs) -> Any`
   Создает `openai.OpenAI` client с `base_url=runtime.url`. Требует optional
   package `openai`.
-- `chat(prompt=None, messages=None, model=None, **params) -> dict[str, Any]`
-  Shortcut для `chat.completions`.
+- `chat(prompt=None, messages=None, model=None, use_rag=None, **params) -> dict[str, Any]`
+  Shortcut для `chat.completions`. Если selected LLM имеет `rag`, retrieval
+  запускается автоматически, пока не передан `use_rag=False`.
 - `embed(input, model=None) -> list[Any]`
   Shortcut для `embeddings`.
 - `open() -> WindowHandle`
   Открывает или переоткрывает browser UI для attached bridge.
+- `chatui(model=None, session="default", use_rag=True, open_browser=True, width=760, height=860) -> WindowHandle`
+  Открывает browser chat window, привязанный к running runtime.
 - `close() -> dict[str, Any]`
   Останавливает bridge и удаляет runtime registry state.
 - `wait_ready(timeout=None, require_browser=False) -> Runtime`

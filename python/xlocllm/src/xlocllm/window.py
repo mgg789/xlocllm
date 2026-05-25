@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from ._paths import browser_profile_dir
-from .registry import upsert_bridge
+from .registry import process_exists, upsert_bridge
 
 
 @dataclass
@@ -22,6 +22,16 @@ class WindowHandle:
     url: str
     pid: int | None
     owned: bool
+
+    @property
+    def alive(self) -> bool:
+        return bool(self.owned and self.pid and process_exists(self.pid))
+
+    def wait(self, poll_interval: float = 0.5) -> None:
+        if not self.owned or not self.pid:
+            return
+        while process_exists(self.pid):
+            time.sleep(poll_interval)
 
     def close(self) -> None:
         if not self.owned or not self.pid:
@@ -38,6 +48,7 @@ def window(
     mode: str = "mini",
     width: int = 420,
     height: int = 340,
+    profile: str | None = None,
 ) -> WindowHandle:
     base_url = web_url or discover_web_url(port)
     query = {"bridgePort": str(port)}
@@ -53,7 +64,7 @@ def window(
             [
                 str(browser),
                 f"--app={url}",
-                f"--user-data-dir={browser_profile_dir(port)}",
+                f"--user-data-dir={browser_profile_dir(port, profile)}",
                 f"--window-size={width},{height}",
                 "--disable-background-timer-throttling",
                 "--disable-backgrounding-occluded-windows",

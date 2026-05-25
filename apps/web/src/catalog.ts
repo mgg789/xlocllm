@@ -69,6 +69,8 @@ export function resolveModel(unit: string, modelName: string): ModelSpec | undef
 
 export function normalizeUnit(unit: string): UnitType {
   const value = normalize(unit);
+  if (value === "vectorstorage" || value === "vector-store" || value === "vector") return "vectorstorage";
+  if (value === "rag") return "RAG";
   if (value === "embeddings") return "embedding";
   if (value === "translator" || value === "translation") return "translator";
   if (value === "image-to-text" || value === "vlm") return "vlm";

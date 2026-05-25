@@ -4,6 +4,10 @@
 
 `217 models are available now! (LLM, emeddings, rerankers, VLM, OCR, TTS and more)`
 
+Includes browser-local RAG: persistent IndexedDB vector stores, embedding +
+optional reranker pipelines, automatic retrieval for LLM units, and
+`runtime.chatui()`.
+
 ## Install
 
 ```powershell
@@ -57,6 +61,22 @@ with xlocllm.runtime([llm]) as runtime:
     print(response.choices[0].message.content)
 ```
 
+## Browser-Local RAG
+
+```python
+import xlocllm
+
+emb = xlocllm.unit("embedding", "multilingual-e5-small")
+rag = xlocllm.rag(emb=emb, name="kb")
+llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b-fp32", rag=rag)
+
+with xlocllm.runtime([llm]) as runtime:
+    runtime.run()
+    rag.add(["xlocllm keeps vector stores in browser IndexedDB."], ids=["storage"])
+    print(runtime.chat("Where does xlocllm keep vectors?"))
+    runtime.chatui(session="kb-demo")
+```
+
 ## Python SDK
 
 The Python package lives in [`python/xlocllm`](python/xlocllm).
@@ -64,7 +84,7 @@ The Python package lives in [`python/xlocllm`](python/xlocllm).
 Core objects:
 
 - `ModelInfo` - catalog entry with model metadata and hardware requirements.
-- `Unit` - one capability/model pair.
+- `Unit` - model-backed, service, or composite capability.
 - `Runtime` - group of units running together.
 - `Bridge` - local HTTP/WebSocket process.
 

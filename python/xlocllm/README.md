@@ -31,6 +31,8 @@ print(runtime.chat("Say hello", temperature=0))
 - Provides OpenAI-compatible `/v1` endpoints for local clients.
 - Supports LLMs, embeddings, rerankers, translation, TTS, vision, ASR, and more
   through a shared catalog.
+- Provides browser-local RAG with IndexedDB vector storage, embeddings,
+  optional reranking, automatic LLM retrieval, and `runtime.chatui()`.
 - Keeps Python-side objects for models, units, runtimes, and bridges.
 
 ## Install
@@ -94,6 +96,22 @@ With the optional helper:
 client = runtime.client()
 ```
 
+## Browser-Local RAG
+
+```python
+import xlocllm
+
+emb = xlocllm.unit("embedding", "multilingual-e5-small")
+rag = xlocllm.rag(emb=emb, name="kb")
+llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b-fp32", rag=rag)
+
+with xlocllm.runtime([llm]) as runtime:
+    runtime.run()
+    rag.add(["xlocllm keeps vector stores in browser IndexedDB."], ids=["storage"])
+    print(runtime.chat("Where does xlocllm keep vectors?"))
+    runtime.chatui(session="kb-demo")
+```
+
 ## Core API
 
 ```python
@@ -102,6 +120,8 @@ models = xlocllm.models(unit="LLM", max_vram_mb=1500)
 cpu_models = xlocllm.models(webgpu=False)
 
 unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None)
+store = xlocllm.vectorstorage("kb")
+rag = xlocllm.rag(emb=xlocllm.unit("embedding", "multilingual-e5-small"), store=store)
 runtime = xlocllm.runtime([unit], port=1146)
 bridge = xlocllm.Bridge(port=1146)
 

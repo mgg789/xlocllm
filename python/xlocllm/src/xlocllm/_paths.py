@@ -21,8 +21,9 @@ def registry_path() -> Path:
     return config_dir() / "bridges.json"
 
 
-def browser_profile_dir(port: int) -> Path:
-    path = config_dir() / "browser-profiles" / str(port)
+def browser_profile_dir(port: int, profile: str | None = None) -> Path:
+    suffix = "" if not profile else "-" + "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in profile)
+    path = config_dir() / "browser-profiles" / f"{port}{suffix}"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

@@ -11,7 +11,7 @@ from .exceptions import (
     UnitNotFound,
     XlocLLMError,
 )
-from .runtime import Runtime, Unit, UnitRuntime, runtime, runtimes, status, unit
+from .runtime import Runtime, Unit, UnitRuntime, rag, runtime, runtimes, status, unit, vectorstorage
 from .types import UnitRequest
 from .window import window
 
@@ -35,11 +35,13 @@ __all__ = [
     "cpu_fallback_model_ids",
     "model",
     "models",
+    "rag",
     "runtime",
     "runtimes",
     "status",
     "supports_cpu_fallback",
     "supports_reasoning",
     "unit",
+    "vectorstorage",
     "window",
 ]

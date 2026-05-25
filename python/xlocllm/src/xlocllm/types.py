@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 UnitType = Literal[
     "LLM",
+    "vectorstorage",
+    "RAG",
     "embedding",
     "reranker",
     "translator",

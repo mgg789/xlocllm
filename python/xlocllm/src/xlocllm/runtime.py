@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
 from typing import Any, Iterable, Literal
+from urllib.parse import urlencode
 
 from .bridge import Bridge, bridges
 from .catalog import ModelInfo, all_models, model as catalog_model, resolve_model
 from .registry import all_runtime_records, bridge_record, process_exists, remove_runtime, upsert_runtime
 from .types import UnitRequest
-from .window import WindowHandle, window
+from .window import WindowHandle, discover_web_url, window
+
+
+SERVICE_UNIT_TYPES = {"vectorstorage", "RAG"}
+_RAG_UNSET: Any = object()
 
 
 @dataclass
@@ -18,6 +24,7 @@ class Unit:
     model_info: ModelInfo | None = None
     reasoning: bool | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    rag: Unit | None = field(default=None, repr=False, compare=False)
     _runtime: Runtime | None = field(default=None, init=False, repr=False, compare=False)
     _single_runtime: Runtime | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -41,6 +48,8 @@ class Unit:
             payload["reasoning"] = self.reasoning
         if self.options:
             payload["options"] = dict(self.options)
+        if self.rag is not None:
+            payload["rag"] = self.rag.to_payload()
         return payload
 
     def to_dict(self) -> dict[str, Any]:
@@ -54,6 +63,8 @@ class Unit:
         )
         if self.model_info is not None:
             payload["model_info"] = self.model_info.to_dict()
+        if self.rag is not None:
+            payload["rag_unit"] = self.rag.to_dict()
         return payload
 
     def status(self) -> dict[str, Any]:
@@ -67,6 +78,8 @@ class Unit:
         return self._runtime.remove_unit(self.id, delete_cache=False)
 
     def delete_cache(self, *, bridge: Bridge | None = None) -> dict[str, Any]:
+        if _is_service_unit_type(self.type):
+            raise ValueError(f"{self.type} units do not have model cache")
         active_bridge = bridge or (self._runtime.bridge if self._runtime is not None else None) or Bridge()
         return active_bridge.delete_model(self.type, self.model)
 
@@ -78,7 +91,78 @@ class Unit:
             return {"ok": True, "updated": self.to_dict(), "runtime_updated": False}
         return self._runtime.configure_unit(self.id, reasoning=enabled)
 
-    def delete(self, *, delete_cache: bool = True, bridge: Bridge | None = None) -> dict[str, Any]:
+    def add(
+        self,
+        documents: str | Sequence[str | Mapping[str, Any]] | None = None,
+        *,
+        ids: Sequence[str] | None = None,
+        metadatas: Sequence[Mapping[str, Any] | None] | None = None,
+        embeddings: Sequence[Sequence[float]] | None = None,
+        **params: Any,
+    ) -> dict[str, Any]:
+        if self.type == "RAG":
+            return self._invoke_bound(
+                "rag.add",
+                {"documents": _documents_payload(documents), "ids": ids, "metadatas": metadatas, **params},
+            )
+        if self.type == "vectorstorage":
+            return self._invoke_bound(
+                "vector.add",
+                {
+                    "documents": _documents_payload(documents),
+                    "ids": ids,
+                    "metadatas": metadatas,
+                    "embeddings": embeddings,
+                    **params,
+                },
+            )
+        raise ValueError(f"{self.type} units do not support add()")
+
+    def search(
+        self,
+        query: str | None = None,
+        *,
+        embedding: Sequence[float] | None = None,
+        top_k: int | None = None,
+        filter: Mapping[str, Any] | None = None,  # noqa: A002
+        **params: Any,
+    ) -> dict[str, Any]:
+        endpoint = "rag.search" if self.type == "RAG" else "vector.search" if self.type == "vectorstorage" else None
+        if endpoint is None:
+            raise ValueError(f"{self.type} units do not support search()")
+        payload: dict[str, Any] = {"query": query, "embedding": embedding, "top_k": top_k, "filter": filter, **params}
+        return self._invoke_bound(endpoint, payload)
+
+    def clear(self, **params: Any) -> dict[str, Any]:
+        endpoint = "rag.clear" if self.type == "RAG" else "vector.clear" if self.type == "vectorstorage" else None
+        if endpoint is None:
+            raise ValueError(f"{self.type} units do not support clear()")
+        return self._invoke_bound(endpoint, params)
+
+    def stats(self) -> dict[str, Any]:
+        endpoint = "rag.stats" if self.type == "RAG" else "vector.stats" if self.type == "vectorstorage" else None
+        if endpoint is None:
+            raise ValueError(f"{self.type} units do not support stats()")
+        return self._invoke_bound(endpoint, {})
+
+    def reindex(self, **params: Any) -> dict[str, Any]:
+        if self.type != "RAG":
+            raise ValueError(f"{self.type} units do not support reindex()")
+        return self._invoke_bound("rag.reindex", params)
+
+    def delete(
+        self,
+        ids: str | Sequence[str] | None = None,
+        *,
+        filter: Mapping[str, Any] | None = None,  # noqa: A002
+        delete_cache: bool = True,
+        bridge: Bridge | None = None,
+        **params: Any,
+    ) -> dict[str, Any]:
+        if self.type == "RAG":
+            return self._invoke_bound("rag.delete", {"ids": _ids_payload(ids), "filter": filter, **params})
+        if self.type == "vectorstorage":
+            return self._invoke_bound("vector.delete", {"ids": _ids_payload(ids), "filter": filter, **params})
         if self._runtime is not None:
             return self._runtime.remove_unit(self.id, delete_cache=delete_cache)
         if not delete_cache:
@@ -109,6 +193,13 @@ class Unit:
     def invoke(self, endpoint: str, payload: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
         return self.as_runtime().invoke(endpoint, payload, timeout=timeout)
 
+    def _invoke_bound(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._runtime is None:
+            raise RuntimeError(f"{self.type}:{self.model} is not attached to a running Runtime")
+        request_payload = dict(payload)
+        request_payload["unit"] = self.to_payload()
+        return self._runtime.invoke(endpoint, request_payload)
+
 
 UnitRuntime = Unit
 _REASONING_UNSET: Any = object()
@@ -127,6 +218,7 @@ class Runtime:
         self.port = int(port)
         self.bridge = bridge
         self.window_handle: WindowHandle | None = None
+        self.chat_window_handle: WindowHandle | None = None
         self.installed = False
         self.running = False
         self._units: list[Unit] = []
@@ -144,11 +236,8 @@ class Runtime:
         return self._bridge_or_default().url
 
     @property
-    def unit_requests(self) -> list[UnitRequest]:
-        return [
-            UnitRequest(type=item.type, model=item.model, reasoning=item.reasoning, options=dict(item.options))
-            for item in self._units
-        ]
+    def unit_requests(self) -> list[dict[str, Any]]:
+        return [unit.to_payload() for unit in self._units]
 
     def __iter__(self) -> Any:
         return iter(self._units)
@@ -174,9 +263,9 @@ class Runtime:
         unit = self._coerce_unit(item)
         existing = self._find_unit(unit.id)
         if existing is not None:
-            existing._runtime = self
+            self._attach_unit(existing)
             return existing
-        unit._runtime = self
+        self._attach_unit(unit)
         self._units.append(unit)
         if activate and self.bridge is not None and self.running:
             self.bridge._post("/xlocllm/v1/runtime/run", {"units": [unit.to_payload()]}, timeout=1800)
@@ -190,9 +279,9 @@ class Runtime:
         self._units.remove(unit)
         unit._runtime = None
         result: dict[str, Any] = {"ok": True, "removed": unit.to_dict(), "units": self.units(as_dict=True)}
-        if self.bridge is not None and delete_cache:
+        if self.bridge is not None and delete_cache and not _is_service_unit_type(unit.type):
             result["delete"] = self.bridge.delete_model(unit.type, unit.model)
-        elif self.bridge is not None and self.running:
+        elif self.bridge is not None and self.running and not _is_service_unit_type(unit.type):
             result["deactivate"] = self.bridge.set_active(unit.type, active=False, model=unit.model)
         self._save_runtime_state("running" if self.running else "configured")
         return result
@@ -212,6 +301,11 @@ class Runtime:
             for unit_state in runtime_state.get("units", []):
                 if isinstance(unit_state, dict) and unit_state.get("type") == unit.type:
                     return {"ok": True, "attached": True, "unit": unit.to_dict(), "state": unit_state}
+            for service_state in runtime_state.get("services", []):
+                if not isinstance(service_state, dict):
+                    continue
+                if service_state.get("runtimeId") == unit.id or service_state.get("runtimeId") == f"{unit.type}:{unit.model}":
+                    return {"ok": True, "attached": True, "unit": unit.to_dict(), "state": service_state}
         return {"ok": True, "attached": True, "unit": unit.to_dict(), "state": {"status": "selected"}}
 
     def configure_unit(
@@ -232,6 +326,15 @@ class Runtime:
             unit.reasoning = reasoning
         if options is not None:
             unit.options.update(options)
+        rag_update = options.get("rag") if options is not None else _RAG_UNSET
+        if isinstance(rag_update, Unit):
+            unit.rag = rag_update
+            self._attach_unit(rag_update)
+        elif isinstance(rag_update, dict):
+            restored_rag = _unit_from_payload(rag_update)
+            if restored_rag is not None:
+                unit.rag = restored_rag
+                self._attach_unit(restored_rag)
         result: dict[str, Any] = {"ok": True, "updated": unit.to_dict(), "runtime_updated": False}
         if self.bridge is not None and self.running:
             result["runtime"] = self.bridge._post(
@@ -263,21 +366,8 @@ class Runtime:
 
     def install(self, port: int | str | None = None) -> dict[str, Any]:
         bridge = self._ensure_bridge(int(port) if port is not None else self.port, daemon=True)
-        self.window_handle = window(
-            port=bridge.port,
-            token=bridge.token,
-            close_on_exit=False,
-            mode="mini",
-            width=420,
-            height=340,
-        )
-        try:
-            bridge.wait_ready(timeout=30, require_browser=True)
-        except TimeoutError as error:
-            raise TimeoutError(
-                "xlocllm bridge is running, but the browser runtime did not connect. "
-                f"Open or reload this URL: {self.window_handle.url}"
-            ) from error
+        self._ensure_runtime_window(bridge)
+        self._wait_for_browser(bridge)
         result = bridge._post(
             "/xlocllm/v1/runtime/install",
             {"units": [unit.to_payload() for unit in self._units]},
@@ -289,13 +379,14 @@ class Runtime:
 
     def run(self, port: int | str | None = None) -> dict[str, Any]:
         bridge = self._ensure_bridge(int(port) if port is not None else self.port, daemon=True)
-        if not self.installed:
-            self.install(bridge.port)
+        self._ensure_runtime_window(bridge)
+        self._wait_for_browser(bridge)
         result = bridge._post(
             "/xlocllm/v1/runtime/run",
             {"units": [unit.to_payload() for unit in self._units]},
             timeout=1800,
         )
+        self.installed = True
         self.running = True
         self._save_runtime_state("running")
         return result
@@ -308,6 +399,9 @@ class Runtime:
         if self.window_handle:
             self.window_handle.close()
             self.window_handle = None
+        if self.chat_window_handle:
+            self.chat_window_handle.close()
+            self.chat_window_handle = None
         return result
 
     def hibernate(self) -> dict[str, Any]:
@@ -369,11 +463,14 @@ class Runtime:
         *,
         messages: list[dict[str, Any]] | None = None,
         model: str | None = None,
+        use_rag: bool | None = None,
         **params: Any,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = dict(params)
         payload["model"] = model or self._default_model("LLM")
         payload["messages"] = messages or [{"role": "user", "content": prompt or ""}]
+        if use_rag is not None:
+            payload["use_rag"] = use_rag
         return self.invoke("chat.completions", payload)
 
     def embed(self, input: str | list[str], *, model: str | None = None) -> list[Any]:  # noqa: A002
@@ -387,6 +484,55 @@ class Runtime:
         self.window_handle = window(port=bridge.port, token=bridge.token, close_on_exit=False, mode="mini")
         return self.window_handle
 
+    def chatui(
+        self,
+        *,
+        model: str | None = None,
+        session: str = "default",
+        use_rag: bool = True,
+        open_browser: bool = True,
+        block: bool = True,
+        width: int = 760,
+        height: int = 860,
+    ) -> WindowHandle:
+        if not any(unit.type == "LLM" for unit in self._units):
+            raise ValueError("runtime.chatui() requires at least one LLM unit")
+        if not self.running:
+            self.run()
+        bridge = self._require_bridge()
+        query = {
+            "bridgePort": str(bridge.port),
+            "pairingToken": bridge.token,
+            "mode": "chat",
+            "session": session,
+            "useRag": "1" if use_rag else "0",
+        }
+        if model:
+            query["model"] = model
+        base_url = discover_web_url(bridge.port)
+        separator = "&" if "?" in base_url else "?"
+        url = f"{base_url}{separator}{urlencode(query)}"
+        if not open_browser:
+            return WindowHandle(port=bridge.port, url=url, pid=None, owned=False)
+        ui_query = {"session": session, "useRag": "1" if use_rag else "0"}
+        if model:
+            ui_query["model"] = model
+        ui_separator = "&" if "?" in base_url else "?"
+        ui_base_url = f"{base_url}{ui_separator}{urlencode(ui_query)}"
+        self.chat_window_handle = window(
+            port=bridge.port,
+            token=bridge.token,
+            close_on_exit=False,
+            mode="chat",
+            width=width,
+            height=height,
+            profile=f"chat-{session}",
+            web_url=ui_base_url,
+        )
+        if block:
+            self.chat_window_handle.wait()
+        return self.chat_window_handle
+
     def close(self) -> dict[str, Any]:
         result = self._require_bridge().close()
         remove_runtime(self.id)
@@ -394,6 +540,9 @@ class Runtime:
         if self.window_handle:
             self.window_handle.close()
             self.window_handle = None
+        if self.chat_window_handle:
+            self.chat_window_handle.close()
+            self.chat_window_handle = None
         return result
 
     def wait_ready(self, timeout: float | None = None, require_browser: bool = False) -> Runtime:
@@ -416,10 +565,49 @@ class Runtime:
     def _bridge_or_default(self) -> Bridge:
         return self.bridge or Bridge(port=self.port)
 
+    def _ensure_runtime_window(self, bridge: Bridge) -> WindowHandle:
+        if (
+            self.window_handle is None
+            or (self.window_handle.owned and self.window_handle.pid is not None and not process_exists(self.window_handle.pid))
+        ):
+            self.window_handle = window(
+                port=bridge.port,
+                token=bridge.token,
+                close_on_exit=False,
+                mode="mini",
+                width=420,
+                height=340,
+            )
+        return self.window_handle
+
+    def _wait_for_browser(self, bridge: Bridge) -> None:
+        try:
+            bridge.wait_ready(timeout=30, require_browser=True)
+        except TimeoutError as error:
+            url = self.window_handle.url if self.window_handle is not None else bridge.base_url
+            if self.window_handle is not None:
+                self.window_handle.close()
+                self.window_handle = None
+            try:
+                bridge.close()
+            except Exception:  # noqa: BLE001
+                pass
+            raise TimeoutError(
+                "xlocllm bridge was started, but the browser runtime did not connect within 30 seconds. "
+                f"The bridge was shut down to avoid an orphan process. Last URL: {url}"
+            ) from error
+
     def _coerce_unit(self, item: Unit | UnitRequest) -> Unit:
         if isinstance(item, Unit):
             return item
         if isinstance(item, UnitRequest):
+            if _is_service_unit_type(item.type):
+                return Unit(
+                    type=_normalize_service_unit_type(item.type),
+                    model=item.model,
+                    reasoning=item.reasoning,
+                    options=dict(item.options or {}),
+                )
             resolved = resolve_model(item.type, item.model)
             return Unit(
                 type=str(resolved["unit"]),
@@ -429,6 +617,11 @@ class Runtime:
                 options=dict(item.options or {}),
             )
         raise TypeError(f"Unsupported runtime item: {type(item)!r}")
+
+    def _attach_unit(self, unit: Unit) -> None:
+        unit._runtime = self
+        for child in _nested_units(unit):
+            child._runtime = self
 
     def _find_unit(self, unit_id: str) -> Unit | None:
         for unit in self._units:
@@ -488,18 +681,85 @@ def unit(
     *,
     reasoning: bool | None = None,
     options: dict[str, Any] | None = None,
+    rag: Unit | UnitRequest | None = None,
 ) -> Unit:
+    if _is_service_unit_type(type):
+        return Unit(
+            type=_normalize_service_unit_type(type),
+            model=model,
+            reasoning=reasoning,
+            options=dict(options or {}),
+        )
     resolved = resolve_model(type, model)
+    rag_unit = _coerce_nested_unit(rag) if rag is not None else None
     unit_item = Unit(
         type=str(resolved["unit"]),
         model=str(resolved["modelId"]),
         model_info=ModelInfo(resolved),
         reasoning=reasoning,
         options=dict(options or {}),
+        rag=rag_unit,
     )
     if reasoning is not None and not unit_item.supports_reasoning:
         raise ValueError(f"{unit_item.label} does not advertise reasoning control")
     return unit_item
+
+
+def vectorstorage(
+    name: str = "default",
+    *,
+    backend: str = "indexeddb",
+    metric: str = "cosine",
+    persist: bool = True,
+    namespace: str = "default",
+    options: dict[str, Any] | None = None,
+) -> Unit:
+    storage_options: dict[str, Any] = {
+        "backend": backend,
+        "metric": metric,
+        "persist": persist,
+        "namespace": namespace,
+    }
+    if options:
+        storage_options.update(options)
+    return Unit(type="vectorstorage", model=name, options=storage_options)
+
+
+def rag(
+    *,
+    emb: Unit | UnitRequest,
+    rerank: Unit | UnitRequest | None = None,
+    store: Unit | UnitRequest | None = None,
+    name: str = "default",
+    chunk_size: int = 800,
+    chunk_overlap: int = 120,
+    top_k: int = 5,
+    candidate_k: int = 30,
+    score_threshold: float | None = None,
+    options: dict[str, Any] | None = None,
+) -> Unit:
+    emb_unit = _coerce_nested_unit(emb)
+    rerank_unit = _coerce_nested_unit(rerank) if rerank is not None else None
+    store_unit = _coerce_nested_unit(store) if store is not None else vectorstorage(name=f"{name}-store")
+    if emb_unit.type != "embedding":
+        raise ValueError("rag(emb=...) requires an embedding unit")
+    if rerank_unit is not None and rerank_unit.type != "reranker":
+        raise ValueError("rag(rerank=...) requires a reranker unit")
+    if store_unit.type != "vectorstorage":
+        raise ValueError("rag(store=...) requires a vectorstorage unit")
+    rag_options: dict[str, Any] = {
+        "emb": emb_unit.to_payload(),
+        "store": store_unit.to_payload(),
+        "rerank": rerank_unit.to_payload() if rerank_unit is not None else None,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "top_k": top_k,
+        "candidate_k": candidate_k,
+        "score_threshold": score_threshold,
+    }
+    if options:
+        rag_options.update(options)
+    return Unit(type="RAG", model=name, options=rag_options)
 
 
 def runtime(
@@ -528,15 +788,9 @@ def runtimes(active_only: bool = True) -> list[Runtime]:
         unit_items = []
         for item in record.get("units", []):
             if isinstance(item, dict) and isinstance(item.get("type"), str) and isinstance(item.get("model"), str):
-                options = item.get("options")
-                unit_items.append(
-                    UnitRequest(
-                        type=item["type"],
-                        model=item["model"],
-                        reasoning=item.get("reasoning") if isinstance(item.get("reasoning"), bool) else None,
-                        options=options if isinstance(options, dict) else None,
-                    )
-                )
+                restored = _unit_from_payload(item)
+                if restored is not None:
+                    unit_items.append(restored)
         if not unit_items:
             continue
         result.append(Runtime(unit_items, port=port, bridge=bridge, runtime_id=runtime_id))
@@ -602,3 +856,102 @@ def _int_or_none(value: Any) -> int | None:
 def _int_or_default(value: Any, default: int) -> int:
     result = _int_or_none(value)
     return default if result is None else result
+
+
+def _is_service_unit_type(unit_type: str) -> bool:
+    return _normalize_service_unit_type(unit_type) in SERVICE_UNIT_TYPES
+
+
+def _normalize_service_unit_type(unit_type: str) -> str:
+    normalized = unit_type.strip().lower().replace("_", "").replace("-", "")
+    if normalized in {"vectorstorage", "vectorstore", "vector"}:
+        return "vectorstorage"
+    if normalized == "rag":
+        return "RAG"
+    return unit_type
+
+
+def _coerce_nested_unit(item: Unit | UnitRequest | None) -> Unit:
+    if item is None:
+        raise TypeError("nested unit cannot be None")
+    if isinstance(item, Unit):
+        return item
+    if isinstance(item, UnitRequest):
+        if _is_service_unit_type(item.type):
+            return Unit(
+                type=_normalize_service_unit_type(item.type),
+                model=item.model,
+                reasoning=item.reasoning,
+                options=dict(item.options or {}),
+            )
+        resolved = resolve_model(item.type, item.model)
+        return Unit(
+            type=str(resolved["unit"]),
+            model=str(resolved["modelId"]),
+            model_info=ModelInfo(resolved),
+            reasoning=item.reasoning,
+            options=dict(item.options or {}),
+        )
+    raise TypeError(f"Unsupported nested unit: {type(item)!r}")
+
+
+def _nested_units(unit: Unit) -> list[Unit]:
+    result: list[Unit] = []
+    if unit.rag is not None:
+        result.append(unit.rag)
+        result.extend(_nested_units(unit.rag))
+    if unit.type == "RAG":
+        for key in ("emb", "store", "rerank"):
+            child = _unit_from_payload(unit.options.get(key))
+            if child is not None:
+                result.append(child)
+                result.extend(_nested_units(child))
+    return result
+
+
+def _unit_from_payload(value: Any) -> Unit | None:
+    if isinstance(value, Unit):
+        return value
+    if not isinstance(value, dict):
+        return None
+    unit_type = value.get("type")
+    model = value.get("model")
+    if not isinstance(unit_type, str) or not isinstance(model, str):
+        return None
+    options = value.get("options")
+    rag_payload = value.get("rag")
+    if _is_service_unit_type(unit_type):
+        return Unit(
+            type=_normalize_service_unit_type(unit_type),
+            model=model,
+            reasoning=value.get("reasoning") if isinstance(value.get("reasoning"), bool) else None,
+            options=options if isinstance(options, dict) else {},
+            rag=_unit_from_payload(rag_payload),
+        )
+    resolved = resolve_model(unit_type, model)
+    return Unit(
+        type=str(resolved["unit"]),
+        model=str(resolved["modelId"]),
+        model_info=ModelInfo(resolved),
+        reasoning=value.get("reasoning") if isinstance(value.get("reasoning"), bool) else None,
+        options=options if isinstance(options, dict) else {},
+        rag=_unit_from_payload(rag_payload),
+    )
+
+
+def _documents_payload(
+    documents: str | Sequence[str | Mapping[str, Any]] | None,
+) -> str | list[str | dict[str, Any]] | None:
+    if documents is None:
+        return None
+    if isinstance(documents, str):
+        return documents
+    return [dict(item) if isinstance(item, Mapping) else str(item) for item in documents]
+
+
+def _ids_payload(ids: str | Sequence[str] | None) -> list[str] | None:
+    if ids is None:
+        return None
+    if isinstance(ids, str):
+        return [ids]
+    return [str(item) for item in ids]

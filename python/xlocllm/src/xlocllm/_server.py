@@ -24,17 +24,19 @@ class BrowserHub:
     def __init__(self, token: str) -> None:
         self.token = token
         self.websocket: WebSocket | None = None
+        self.connected = asyncio.Event()
         self.pending: dict[str, asyncio.Future[Any]] = {}
         self.streams: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self.status: dict[str, Any] = {"connected": False}
         self.logs: list[dict[str, Any]] = []
 
-    async def connect(self, websocket: WebSocket, token: str | None) -> None:
+    async def connect(self, websocket: WebSocket, token: str | None) -> bool:
         if token != self.token:
             await websocket.close(code=4401)
-            return
+            return False
         await websocket.accept()
         self.websocket = websocket
+        self.connected.set()
         self.status["connected"] = True
         self.log("info", "Browser runtime connected")
         try:
@@ -46,11 +48,13 @@ class BrowserHub:
         finally:
             if self.websocket is websocket:
                 self.websocket = None
+                self.connected.clear()
                 self.status["connected"] = False
                 for future in self.pending.values():
                     if not future.done():
                         future.set_exception(RuntimeError("Browser runtime disconnected"))
                 self.pending.clear()
+        return True
 
     def handle_browser_message(self, message: dict[str, Any]) -> None:
         message_type = message.get("type")
@@ -108,6 +112,15 @@ class BrowserHub:
         finally:
             self.pending.pop(request_id, None)
 
+    async def wait_connected(self, timeout: float) -> bool:
+        if self.websocket is not None:
+            return True
+        try:
+            await asyncio.wait_for(self.connected.wait(), timeout=timeout)
+            return self.websocket is not None
+        except TimeoutError:
+            return False
+
     async def stream_rpc(
         self,
         endpoint: str,
@@ -156,6 +169,7 @@ def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI
     app.state.hub = hub
     app.state.started_at = time.time()
     app.state.live_time = live_time
+    app.state.mini_disconnect_task = None
 
     @app.on_event("startup")
     async def schedule_live_time_shutdown() -> None:
@@ -191,13 +205,11 @@ def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI
     @app.websocket("/xlocllm/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
         mode = websocket.query_params.get("mode")
-        await hub.connect(websocket, websocket.query_params.get("token"))
         if mode == "mini":
-            hub.log("info", "Mini browser window closed; shutting down bridge daemon")
-            remove_bridge(port)
-            server = getattr(app.state, "uvicorn_server", None)
-            if server is not None:
-                server.should_exit = True
+            cancel_mini_disconnect_shutdown(app)
+        accepted = await hub.connect(websocket, websocket.query_params.get("token"))
+        if accepted and mode == "mini":
+            schedule_mini_disconnect_shutdown(app, port, hub, delay=30.0)
 
     @app.get("/xlocllm/v1/status")
     async def status() -> dict[str, Any]:
@@ -318,6 +330,7 @@ def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI
 
     @app.post("/xlocllm/v1/shutdown")
     async def shutdown() -> dict[str, Any]:
+        cancel_mini_disconnect_shutdown(app)
         remove_bridge(port)
         server = getattr(app.state, "uvicorn_server", None)
         if server is not None:
@@ -336,18 +349,68 @@ async def safe_rpc(
     payload: dict[str, Any] | None = None,
     timeout: float = 900.0,
 ) -> Any:
+    retry_deadline = time.monotonic() + 30.0
+    attempt = 0
     try:
-        return await hub.rpc(
-            request_type,
-            endpoint=endpoint,
-            units=units,
-            payload=payload,
-            timeout=timeout,
-        )
+        while True:
+            try:
+                return await hub.rpc(
+                    request_type,
+                    endpoint=endpoint,
+                    units=units,
+                    payload=payload,
+                    timeout=timeout,
+                )
+            except HTTPException as error:
+                if error.status_code != 503:
+                    raise
+                remaining = retry_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                attempt += 1
+                hub.log("warn", f"Browser runtime is not connected; waiting for reconnect ({attempt})")
+                if not await hub.wait_connected(timeout=remaining):
+                    raise HTTPException(status_code=503, detail="Browser runtime did not reconnect within 30 seconds") from error
+            except RuntimeError as error:
+                if "Browser runtime disconnected" not in str(error):
+                    raise
+                remaining = retry_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                attempt += 1
+                hub.log("warn", f"Browser runtime disconnected during RPC; retrying after reconnect ({attempt})")
+                if not await hub.wait_connected(timeout=remaining):
+                    raise HTTPException(status_code=503, detail="Browser runtime did not reconnect within 30 seconds") from error
     except HTTPException:
         raise
     except RuntimeError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+def cancel_mini_disconnect_shutdown(app: FastAPI) -> None:
+    task = getattr(app.state, "mini_disconnect_task", None)
+    if task is not None and not task.done():
+        task.cancel()
+    app.state.mini_disconnect_task = None
+
+
+def schedule_mini_disconnect_shutdown(app: FastAPI, port: int, hub: BrowserHub, *, delay: float) -> None:
+    cancel_mini_disconnect_shutdown(app)
+    app.state.mini_disconnect_task = asyncio.create_task(shutdown_if_mini_disconnected(app, port, hub, delay))
+
+
+async def shutdown_if_mini_disconnected(app: FastAPI, port: int, hub: BrowserHub, delay: float) -> None:
+    try:
+        await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        return
+    if hub.websocket is not None:
+        return
+    hub.log("info", f"Mini browser window has been disconnected for {int(delay)} seconds; shutting down bridge daemon")
+    remove_bridge(port)
+    server = getattr(app.state, "uvicorn_server", None)
+    if server is not None:
+        server.should_exit = True
 
 
 async def stream_chat(hub: BrowserHub, payload: dict[str, Any]) -> AsyncIterator[str]:
@@ -375,7 +438,7 @@ async def stream_chat(hub: BrowserHub, payload: dict[str, Any]) -> AsyncIterator
 
 def openai_chat_response(payload: dict[str, Any], result: Any) -> dict[str, Any]:
     content = extract_content(result)
-    return {
+    response: dict[str, Any] = {
         "id": f"chatcmpl_{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
@@ -393,6 +456,10 @@ def openai_chat_response(payload: dict[str, Any], result: Any) -> dict[str, Any]
             "total_tokens": 0,
         },
     }
+    rag = extract_rag(result)
+    if rag is not None:
+        response["xlocllm"] = {"rag": rag}
+    return response
 
 
 def extract_content(result: Any) -> str:
@@ -412,6 +479,17 @@ def extract_content(result: Any) -> str:
         except (KeyError, IndexError, TypeError):
             return json.dumps(result)
     return json.dumps(result)
+
+
+def extract_rag(result: Any) -> Any:
+    if not isinstance(result, dict):
+        return None
+    if result.get("rag") is not None:
+        return result["rag"]
+    raw = result.get("raw")
+    if isinstance(raw, dict) and raw.get("rag") is not None:
+        return raw["rag"]
+    return None
 
 
 def bridge_status(port: int, hub: BrowserHub) -> dict[str, Any]:

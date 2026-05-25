@@ -8,6 +8,7 @@ import {
   Gauge,
   HardDrive,
   MemoryStick,
+  MessageCircle,
   Moon,
   Pause,
   Play,
@@ -16,6 +17,7 @@ import {
   Power,
   RefreshCw,
   Search,
+  Send,
   SlidersHorizontal,
   Square,
   Star,
@@ -38,7 +40,14 @@ const favoriteStorageKey = "xlocllm:favorites";
 type BridgeState = "disabled" | "connecting" | "connected" | "error";
 type Theme = "light" | "dark";
 type View = "dashboard" | "catalog";
+type AppMode = "full" | "mini" | "chat";
 type SortMode = "recommended" | "name" | "size-asc" | "size-desc" | "params-asc" | "params-desc";
+
+type ChatMessage = {
+  role: "user" | "assistant" | "system";
+  content: string;
+  rag?: any;
+};
 
 interface Filters {
   unit: "all" | UnitType;
@@ -72,6 +81,7 @@ const defaultFilters: Filters = {
 };
 
 export default function App() {
+  const appMode = readAppMode();
   const host = useMemo(() => new RuntimeHost(), []);
   const bridge = useMemo(() => new BridgeClient(host), [host]);
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot>(host.snapshot());
@@ -88,22 +98,10 @@ export default function App() {
   useEffect(() => host.subscribe(() => setSnapshot(host.snapshot())), [host]);
   useEffect(() => bridge.subscribe((state) => setBridgeState(state as BridgeState)), [bridge]);
   useEffect(() => {
+    if (appMode === "chat") return undefined;
     bridge.startFromLocation(window.location);
     return () => bridge.stop();
-  }, [bridge]);
-  useEffect(() => {
-    if (!isMiniMode()) return undefined;
-    const shutdownBridge = () => {
-      const bridgePort = new URLSearchParams(window.location.search).get("bridgePort");
-      if (!bridgePort) return;
-      const url = `http://127.0.0.1:${bridgePort}/xlocllm/v1/shutdown`;
-      if (!navigator.sendBeacon(url, new Blob())) {
-        void fetch(url, { method: "POST", keepalive: true }).catch(() => undefined);
-      }
-    };
-    window.addEventListener("pagehide", shutdownBridge);
-    return () => window.removeEventListener("pagehide", shutdownBridge);
-  }, []);
+  }, [appMode, bridge]);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
@@ -114,7 +112,7 @@ export default function App() {
   }, [favorites]);
 
   const activeUnits = runtimeUnits(snapshot.models.filter((model) => model.active));
-  const miniMode = isMiniMode();
+  const miniMode = appMode === "mini";
 
   const actions = {
     install: () => host.install(activeUnits).catch(console.error),
@@ -137,6 +135,10 @@ export default function App() {
       return next;
     });
   };
+
+  if (appMode === "chat") {
+    return <ChatRuntime initialPort={port} />;
+  }
 
   if (miniMode) {
     return (
@@ -226,6 +228,138 @@ export default function App() {
           </div>
         </div>
       )}
+    </main>
+  );
+}
+
+function ChatRuntime({ initialPort }: { initialPort: number }) {
+  const params = new URLSearchParams(window.location.search);
+  const session = params.get("session") || "default";
+  const [port] = useState(initialPort);
+  const [messages, setMessages] = useState<ChatMessage[]>(() => readChatMessages(port, session));
+  const [input, setInput] = useState("");
+  const [models, setModels] = useState<RuntimeModelState[]>([]);
+  const [model, setModel] = useState(params.get("model") || "");
+  const [useRag, setUseRag] = useState(params.get("useRag") !== "0");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  useEffect(() => {
+    window.localStorage.setItem(chatStorageKey(port, session), JSON.stringify(messages));
+  }, [messages, port, session]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await fetch(`${baseUrl}/xlocllm/v1/status`);
+        const data = await response.json();
+        const runtimeModels = Array.isArray(data.runtime?.models) ? data.runtime.models : [];
+        const llms = runtimeModels.filter((item: RuntimeModelState) => item.unit === "LLM" && item.active);
+        if (cancelled) return;
+        setModels(llms);
+        if (!model && llms[0]?.modelId) setModel(llms[0].modelId);
+      } catch (loadError) {
+        if (!cancelled) setError(String(loadError instanceof Error ? loadError.message : loadError));
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [baseUrl, model]);
+
+  const sendMessage = async () => {
+    const text = input.trim();
+    if (!text || busy) return;
+    const nextMessages: ChatMessage[] = [...messages, { role: "user", content: text }];
+    setMessages(nextMessages);
+    setInput("");
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`${baseUrl}/xlocllm/v1/invoke/chat.completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: model || undefined,
+          messages: nextMessages.map(({ role, content }) => ({ role, content })),
+          use_rag: useRag,
+          max_tokens: 512,
+          temperature: 0.2,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail ?? "chat request failed");
+      const content = extractChatContent(data);
+      const rag = data.rag ?? data.raw?.rag;
+      setMessages([...nextMessages, { role: "assistant", content, rag }]);
+    } catch (sendError) {
+      setError(String(sendError instanceof Error ? sendError.message : sendError));
+      setMessages(messages);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="chat-shell">
+      <header className="chat-header">
+        <div>
+          <h1>xlocllm chat</h1>
+          <span>{port}</span>
+        </div>
+        <select value={model} onChange={(event) => setModel(event.target.value)}>
+          {models.length === 0 ? <option value="">LLM</option> : null}
+          {models.map((item) => (
+            <option key={item.modelId} value={item.modelId}>
+              {item.modelId}
+            </option>
+          ))}
+        </select>
+        <label className="chat-toggle">
+          <input type="checkbox" checked={useRag} onChange={(event) => setUseRag(event.target.checked)} />
+          <span>RAG</span>
+        </label>
+        <button type="button" className="icon-button" title="Clear chat" onClick={() => setMessages([])}>
+          <Trash2 size={18} />
+        </button>
+      </header>
+
+      <section className="chat-log">
+        {messages.length === 0 ? (
+          <div className="chat-empty">
+            <MessageCircle size={26} />
+            <span>New chat</span>
+          </div>
+        ) : (
+          messages.map((message, index) => (
+            <article key={`${message.role}-${index}`} className={`chat-message ${message.role}`}>
+              <p>{message.content}</p>
+              {message.rag?.results?.length ? <small>{message.rag.results.length} sources</small> : null}
+            </article>
+          ))
+        )}
+        {busy ? <article className="chat-message assistant pending"><p>...</p></article> : null}
+      </section>
+
+      {error ? <div className="chat-error">{error}</div> : null}
+
+      <form
+        className="chat-compose"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void sendMessage();
+        }}
+      >
+        <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder="Message" rows={3} />
+        <button type="submit" disabled={busy || !input.trim()} title="Send">
+          <Send size={18} />
+        </button>
+      </form>
     </main>
   );
 }
@@ -916,9 +1050,11 @@ function initialPort(): number {
   return Number.isFinite(value) && value > 0 ? value : defaultPort;
 }
 
-function isMiniMode(): boolean {
+function readAppMode(): AppMode {
   const params = new URLSearchParams(window.location.search);
-  return params.get("mode") === "mini" || params.get("uiMode") === "mini";
+  const mode = params.get("mode") ?? params.get("uiMode");
+  if (mode === "mini" || mode === "chat") return mode;
+  return "full";
 }
 
 function updateQueryPort(port: number) {
@@ -973,4 +1109,31 @@ function logoKeyLabel(logoKey?: string): string {
 
 function normalize(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function chatStorageKey(port: number, session: string): string {
+  return `xlocllm:chat:${port}:${session}`;
+}
+
+function readChatMessages(port: number, session: string): ChatMessage[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(chatStorageKey(port, session)) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item) =>
+        item &&
+        typeof item === "object" &&
+        ["user", "assistant", "system"].includes(item.role) &&
+        typeof item.content === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+function extractChatContent(data: any): string {
+  if (typeof data?.content === "string") return data.content;
+  if (typeof data?.choices?.[0]?.message?.content === "string") return data.choices[0].message.content;
+  if (typeof data?.raw?.choices?.[0]?.message?.content === "string") return data.raw.choices[0].message.content;
+  return JSON.stringify(data);
 }
