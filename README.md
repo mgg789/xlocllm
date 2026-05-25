@@ -2,6 +2,8 @@
 
 `xlocllm` is a local browser inference manager for AI/ML models, runnig from python or typescript (soon). xlocllm uses WebGPU and NPU to run models. This is one of the easiest ways to run LLM on your PC. Created by Droidje AI.
 
+`217 models are available now! (LLM, emeddings, rerankers, VLM, OCR, TTS and more)`
+
 ## Install
 
 ```powershell
