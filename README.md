@@ -14,6 +14,8 @@ catalog still exposes the browser-ready `packages/catalog` model set.
 Includes local RAG: persistent vector stores, embedding + optional reranker
 pipelines, automatic retrieval for LLM units, and `runtime.chatui()`.
 
+Check our [detaild documentation](https://github.com/mgg789/xlocllm/wiki)
+
 ## Install
 
 ```powershell
