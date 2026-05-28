@@ -9,6 +9,18 @@ other task models.
 The existing browser/WebGPU runtime remains available with `mode="web"`. It
 keeps the old paired-browser behavior through MLC WebLLM and Transformers.js.
 
+Project and machine-readable docs links:
+
+```python
+import xlocllm
+
+print(xlocllm.PROJECT_URLS)
+print(xlocllm.DOCUMENTATION_URL)  # https://github.com/mgg789/xlocllm/wiki/Python-Unit
+```
+
+- Repository: <https://github.com/mgg789/xlocllm/>
+- Python Unit wiki: <https://github.com/mgg789/xlocllm/wiki/Python-Unit>
+
 ## Install
 
 ```powershell

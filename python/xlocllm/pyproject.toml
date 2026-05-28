@@ -8,9 +8,10 @@ version = "1.1.0"
 description = "Local native and browser-backed AI inference bridge"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 authors = [
-  { name = "xlocllm contributors" }
+  { name = "mgg789" }
 ]
 keywords = ["llm", "local-ai", "openai", "gguf", "onnxruntime", "webgpu"]
 dependencies = [
@@ -21,7 +22,7 @@ dependencies = [
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: BSD License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
@@ -36,6 +37,8 @@ classifiers = [
 Homepage = "https://github.com/mgg789/xlocllm"
 Repository = "https://github.com/mgg789/xlocllm"
 Documentation = "https://github.com/mgg789/xlocllm#readme"
+Wiki = "https://github.com/mgg789/xlocllm/wiki"
+"Python Unit Docs" = "https://github.com/mgg789/xlocllm/wiki/Python-Unit"
 Issues = "https://github.com/mgg789/xlocllm/issues"
 
 [project.optional-dependencies]

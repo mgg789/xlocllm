@@ -152,6 +152,8 @@ xlocllm run --unit LLM --model "Qwen-3.5-0.8b" --mode web
 
 ## Documentation
 
+- Repository: [`mgg789/xlocllm`](https://github.com/mgg789/xlocllm/)
+- Python Unit wiki for AI/tools: [`Python-Unit`](https://github.com/mgg789/xlocllm/wiki/Python-Unit)
 - Full English SDK docs: [`python/xlocllm/docs.md`](python/xlocllm/docs.md)
 - Full Russian SDK docs: [`python/xlocllm/docs_ru.md`](python/xlocllm/docs_ru.md)
 - Ready-to-run Russian recipes: [`python/xlocllm/recipes_ru.md`](python/xlocllm/recipes_ru.md)
@@ -196,4 +198,5 @@ The web app is served on `http://127.0.0.1:8080`.
 
 ## License
 
-MIT
+BSD-3-Clause. Redistributions must retain the copyright notice:
+`Copyright (c) 2026, mgg789 / Droidje AI`.

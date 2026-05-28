@@ -10,6 +10,19 @@ vision, audio, OCR и других task-моделей.
 модели в связанном окне браузера через WebGPU/WebNN, MLC WebLLM или
 Transformers.js.
 
+Ссылки на проект и документацию доступны прямо из Python-пакета, чтобы агенты и
+инструменты могли сами находить актуальные docs:
+
+```python
+import xlocllm
+
+print(xlocllm.PROJECT_URLS)
+print(xlocllm.DOCUMENTATION_URL)  # https://github.com/mgg789/xlocllm/wiki/Python-Unit
+```
+
+- Repository: <https://github.com/mgg789/xlocllm/>
+- Python Unit wiki: <https://github.com/mgg789/xlocllm/wiki/Python-Unit>
+
 ## Установка
 
 ```powershell

@@ -19,6 +19,16 @@ from .types import UnitRequest
 from .window import window
 
 mode = DEFAULT_MODE
+__author__ = "mgg789"
+__license__ = "BSD-3-Clause"
+REPOSITORY_URL = "https://github.com/mgg789/xlocllm/"
+DOCUMENTATION_URL = "https://github.com/mgg789/xlocllm/wiki/Python-Unit"
+WIKI_URL = "https://github.com/mgg789/xlocllm/wiki"
+PROJECT_URLS = {
+    "repository": REPOSITORY_URL,
+    "documentation": DOCUMENTATION_URL,
+    "wiki": WIKI_URL,
+}
 
 __all__ = [
     "Bridge",
@@ -29,12 +39,16 @@ __all__ = [
     "ModelInfo",
     "ModelNotFound",
     "NativeBridge",
+    "DOCUMENTATION_URL",
+    "PROJECT_URLS",
+    "REPOSITORY_URL",
     "Runtime",
     "RuntimeNotFound",
     "Unit",
     "UnitRuntime",
     "UnitRequest",
     "UnitNotFound",
+    "WIKI_URL",
     "XlocLLMError",
     "benchmark",
     "bridges",

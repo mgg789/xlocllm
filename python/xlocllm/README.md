@@ -229,11 +229,22 @@ xlocllm cache clear --mode native --yes
 
 ## Documentation
 
+- Repository: [`mgg789/xlocllm`](https://github.com/mgg789/xlocllm/)
+- Python Unit wiki for AI/tools: [`Python-Unit`](https://github.com/mgg789/xlocllm/wiki/Python-Unit)
 - Full English SDK docs: [`docs.md`](https://github.com/mgg789/xlocllm/blob/main/python/xlocllm/docs.md)
 - Full Russian SDK docs: [`docs_ru.md`](https://github.com/mgg789/xlocllm/blob/main/python/xlocllm/docs_ru.md)
 - Ready-to-run Russian recipes: [`recipes_ru.md`](https://github.com/mgg789/xlocllm/blob/main/python/xlocllm/recipes_ru.md)
 - English model catalog: [`models.md`](https://github.com/mgg789/xlocllm/blob/main/python/xlocllm/models.md)
 - Russian model catalog: [`models_ru.md`](https://github.com/mgg789/xlocllm/blob/main/python/xlocllm/models_ru.md)
+
+These URLs are also exposed from the Python package for agents and tooling:
+
+```python
+import xlocllm
+
+print(xlocllm.PROJECT_URLS)
+print(xlocllm.DOCUMENTATION_URL)
+```
 
 ## Model Lookup
 
@@ -288,4 +299,5 @@ Transformers.js subset and rejects heavier models before loading.
 
 ## License
 
-MIT
+BSD-3-Clause. Redistributions must retain the copyright notice:
+`Copyright (c) 2026, mgg789 / Droidje AI`.
