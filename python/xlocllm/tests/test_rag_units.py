@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 import xlocllm
@@ -55,6 +57,26 @@ def test_onnx_service_unit_payload_and_predict_guard() -> None:
     assert regression.to_payload()["options"]["model_path"] == "model.onnx"
     with pytest.raises(RuntimeError, match="not attached"):
         regression.predict([[1.0, 2.0]])
+
+
+def test_modelinfo_unit_and_custom_onnx_path_payload(tmp_path: Path) -> None:
+    info = xlocllm.model("Qwen-3.5-0.8b", unit="LLM")
+    llm = xlocllm.unit(info)
+    onnx_path = tmp_path / "classifier.onnx"
+    onnx_path.write_bytes(b"fake")
+    classifier = xlocllm.unit(
+        onnx_path,
+        type="text-classification",
+        name="demo-classifier",
+        labels=["negative", "positive"],
+    )
+
+    assert llm.model == info.model_id
+    assert classifier.type == "text-classification"
+    assert classifier.to_payload()["options"]["custom"] is True
+    assert classifier.to_payload()["options"]["labels"] == ["negative", "positive"]
+    with pytest.raises(RuntimeError, match="not attached"):
+        classifier.predict([[0.1, 0.9]])
 
 
 def test_runtime_attaches_nested_rag() -> None:

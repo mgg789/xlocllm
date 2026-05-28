@@ -4,12 +4,14 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any, Iterable, Literal
 from urllib.parse import urlencode
 
 from .bridge import Bridge, bridges
 from .catalog import ModelInfo, all_models, model as catalog_model, resolve_model
-from ._mode import RuntimeMode, current_mode
+from ._mode import RuntimeMode, current_mode, current_web_device
+from ._paths import config_dir
 from .native_bridge import NativeBridge
 from .registry import all_runtime_records, bridge_record, process_exists, remove_runtime, upsert_runtime
 from .types import UnitRequest
@@ -47,6 +49,22 @@ class Unit:
     @property
     def supports_reasoning(self) -> bool:
         return bool(self.model_info and self.model_info.supports_reasoning)
+
+    @property
+    def is_custom(self) -> bool:
+        return bool(self.options.get("custom") or self.options.get("custom_type") or self.options.get("model_path"))
+
+    def __enter__(self) -> Unit:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> Literal[False]:
+        if self.options.get("cleanup_on_exit"):
+            for raw_path in self.options.get("cleanup_paths", []):
+                try:
+                    Path(str(raw_path)).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return False
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"type": self.type, "model": self.model}
@@ -165,7 +183,7 @@ class Unit:
         return self._invoke_bound("rag.reindex", params)
 
     def predict(self, inputs: Any = None, **params: Any) -> dict[str, Any]:
-        if self.type != "onnx":
+        if self.type != "onnx" and not self.is_custom:
             raise ValueError(f"{self.type} units do not support predict()")
         return self._invoke_bound("onnx.predict", {"inputs": inputs, **params})
 
@@ -661,7 +679,7 @@ class Runtime:
                 )
             return item
         if isinstance(item, UnitRequest):
-            item_options = dict(item.options or {})
+            item_options = _options_with_scope_defaults(dict(item.options or {}), self.mode)
             raw_quant = item_options.get("quant")
             item_quant = raw_quant if isinstance(raw_quant, str) else None
             if _is_service_unit_type(item.type):
@@ -747,26 +765,73 @@ class Runtime:
 
 
 def unit(
-    type: str,  # noqa: A002
-    model: str,
-    *,
+    *args: Any,
+    type: str | None = None,  # noqa: A002
+    model: Any = None,
+    name: str | None = None,
     mode: str | None = None,
     quant: str | None = None,
     reasoning: bool | None = None,
     options: dict[str, Any] | None = None,
     rag: Unit | UnitRequest | None = None,
+    labels: Sequence[str] | None = None,
+    task: str | None = None,
+    input_name: str | None = None,
+    output_names: Sequence[str] | None = None,
+    example_input: Any = None,
+    input_shape: Sequence[int | None] | None = None,
+    **custom_options: Any,
 ) -> Unit:
     resolved_mode = current_mode(mode)
-    if _is_service_unit_type(type):
+    unit_type, model_value, source = _parse_unit_arguments(args, type=type, model=model)
+    unit_options = _options_with_scope_defaults(dict(options or {}), resolved_mode)
+    unit_options.update({key: value for key, value in custom_options.items() if value is not None})
+    if labels is not None:
+        unit_options["labels"] = [str(item) for item in labels]
+    if task is not None:
+        unit_options["task"] = task
+    if input_name is not None:
+        unit_options["input_name"] = input_name
+    if output_names is not None:
+        unit_options["output_names"] = [str(item) for item in output_names]
+
+    if isinstance(source, ModelInfo):
+        return _unit_from_model_info(
+            source,
+            mode=mode,
+            quant=quant,
+            reasoning=reasoning,
+            options=unit_options,
+            rag=rag,
+        )
+
+    if _is_custom_source(source, unit_type=unit_type, model_value=model_value):
+        return _custom_unit(
+            source,
+            unit_type=unit_type,
+            name=name or _custom_name(source, model_value),
+            mode=resolved_mode,
+            options=unit_options,
+            labels=labels,
+            input_name=input_name,
+            output_names=output_names,
+            example_input=example_input,
+            input_shape=input_shape,
+        )
+
+    if unit_type is None or model_value is None:
+        raise TypeError("unit() requires a unit type and model, a ModelInfo, or a custom model object")
+    model_name = str(model_value)
+    if _is_service_unit_type(unit_type):
         return Unit(
-            type=_normalize_service_unit_type(type),
-            model=model,
+            type=_normalize_service_unit_type(unit_type),
+            model=model_name,
             mode=resolved_mode,
             quant=quant,
             reasoning=reasoning,
-            options=dict(options or {}),
+            options=unit_options,
         )
-    resolved = resolve_model(type, model, mode=resolved_mode, quant=quant)
+    resolved = resolve_model(unit_type, model_name, mode=resolved_mode, quant=quant)
     rag_unit = _coerce_nested_unit(rag, mode=resolved_mode) if rag is not None else None
     selected_quant = (
         str(resolved.get("selectedQuantization") or quant)
@@ -780,12 +845,222 @@ def unit(
         mode=resolved_mode,
         quant=selected_quant,
         reasoning=reasoning,
-        options=dict(options or {}),
+        options=unit_options,
         rag=rag_unit,
     )
     if reasoning is not None and not unit_item.supports_reasoning:
         raise ValueError(f"{unit_item.label} does not advertise reasoning control")
     return unit_item
+
+
+def _parse_unit_arguments(args: tuple[Any, ...], *, type: str | None, model: Any) -> tuple[str | None, Any, Any]:
+    if len(args) > 2:
+        raise TypeError("unit() accepts at most two positional arguments")
+    if len(args) == 0:
+        source = model
+        return type, model, source
+    if len(args) == 1:
+        source = args[0]
+        if isinstance(source, ModelInfo):
+            return type or str(source["unit"]), source.model_id, source
+        if type is not None:
+            return type, model, source
+        if model is not None:
+            return str(source), model, model
+        return None, None, source
+    if type is not None or model is not None:
+        raise TypeError("unit() got both positional and keyword unit/model arguments")
+    return str(args[0]), args[1], args[1]
+
+
+def _options_with_scope_defaults(options: dict[str, Any], mode: str) -> dict[str, Any]:
+    if mode == "web" and "device" not in options:
+        device = current_web_device()
+        if device:
+            options["device"] = device
+    return options
+
+
+def _unit_from_model_info(
+    item: ModelInfo,
+    *,
+    mode: str | None,
+    quant: str | None,
+    reasoning: bool | None,
+    options: dict[str, Any],
+    rag: Unit | UnitRequest | None,
+) -> Unit:
+    data = item.to_dict()
+    inferred_mode = "native" if data.get("runtime") == "native" or data.get("backend") in {"llama.cpp", "onnxruntime"} else "web"
+    resolved_mode = current_mode(mode or inferred_mode)
+    if resolved_mode == "native" and data.get("format") == "gguf" and quant is not None:
+        data = catalog_model(str(data["modelId"]), unit=str(data["unit"]), mode=resolved_mode, quant=quant).to_dict()
+    rag_unit = _coerce_nested_unit(rag, mode=resolved_mode) if rag is not None else None
+    selected_quant = str(data.get("selectedQuantization") or quant) if data.get("selectedQuantization") or quant else None
+    result = Unit(
+        type=str(data["unit"]),
+        model=str(data["modelId"]),
+        model_info=ModelInfo(data),
+        mode=resolved_mode,
+        quant=selected_quant,
+        reasoning=reasoning,
+        options=options,
+        rag=rag_unit,
+    )
+    if reasoning is not None and not result.supports_reasoning:
+        raise ValueError(f"{result.label} does not advertise reasoning control")
+    return result
+
+
+def _is_custom_source(source: Any, *, unit_type: str | None, model_value: Any) -> bool:
+    if isinstance(source, ModelInfo) or source is None:
+        return False
+    if isinstance(source, (str, Path)):
+        text = str(source)
+        return unit_type is not None and (text.lower().endswith(".onnx") or Path(text).exists())
+    if unit_type is not None and model_value is None:
+        return True
+    return False
+
+
+def _custom_name(source: Any, model_value: Any) -> str:
+    if model_value is not None:
+        return str(model_value)
+    if isinstance(source, (str, Path)):
+        return Path(str(source)).stem
+    return source.__class__.__name__
+
+
+def _custom_unit(
+    source: Any,
+    *,
+    unit_type: str | None,
+    name: str,
+    mode: str,
+    options: dict[str, Any],
+    labels: Sequence[str] | None,
+    input_name: str | None,
+    output_names: Sequence[str] | None,
+    example_input: Any,
+    input_shape: Sequence[int | None] | None,
+) -> Unit:
+    if unit_type is None:
+        raise TypeError("custom unit() requires type=...")
+    normalized_type = _normalize_service_unit_type(unit_type)
+    public_type = "onnx" if normalized_type == "onnx" else unit_type
+    unit_options = dict(options)
+    unit_options["custom"] = True
+    unit_options["custom_type"] = "onnx"
+    unit_options["task"] = unit_options.get("task") or unit_type
+    if labels is not None:
+        unit_options["labels"] = [str(item) for item in labels]
+    if input_name is not None:
+        unit_options["input_name"] = input_name
+    if output_names is not None:
+        unit_options["output_names"] = [str(item) for item in output_names]
+
+    if isinstance(source, (str, Path)):
+        path = Path(str(source)).expanduser()
+        unit_options["model_path"] = str(path)
+    elif _looks_like_sklearn(source):
+        if labels is None and hasattr(source, "classes_"):
+            unit_options["labels"] = [str(item) for item in getattr(source, "classes_")]
+        path = _export_sklearn_to_onnx(
+            source,
+            name=name,
+            input_name=str(unit_options.get("input_name") or "float_input"),
+            input_shape=input_shape,
+        )
+        unit_options["model_path"] = str(path)
+        unit_options["source"] = "sklearn"
+        unit_options.setdefault("input_name", "float_input")
+    elif _looks_like_torch(source):
+        path = _export_torch_to_onnx(
+            source,
+            name=name,
+            input_name=str(unit_options.get("input_name") or "input"),
+            example_input=example_input,
+            input_shape=input_shape,
+        )
+        unit_options["model_path"] = str(path)
+        unit_options["source"] = "torch"
+        unit_options.setdefault("input_name", "input")
+    else:
+        raise TypeError("custom unit source must be an ONNX path, sklearn estimator, or torch.nn.Module")
+
+    return Unit(type=public_type, model=name, mode=current_mode(mode), options=unit_options)
+
+
+def _looks_like_sklearn(source: Any) -> bool:
+    module = getattr(source.__class__, "__module__", "")
+    return module.startswith("sklearn.") or hasattr(source, "n_features_in_")
+
+
+def _looks_like_torch(source: Any) -> bool:
+    module = getattr(source.__class__, "__module__", "")
+    return module.startswith("torch.") or hasattr(source, "state_dict") and callable(getattr(source, "state_dict", None))
+
+
+def _custom_artifact_path(name: str) -> Path:
+    safe = "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in name).strip("-") or "model"
+    path = config_dir() / "custom-models"
+    path.mkdir(parents=True, exist_ok=True)
+    return path / f"{safe}.onnx"
+
+
+def _export_sklearn_to_onnx(source: Any, *, name: str, input_name: str, input_shape: Sequence[int | None] | None) -> Path:
+    try:
+        from skl2onnx import convert_sklearn  # type: ignore[import-not-found]
+        from skl2onnx.common.data_types import FloatTensorType  # type: ignore[import-not-found]
+    except ImportError as error:
+        raise ImportError("custom sklearn units require the optional 'skl2onnx' package") from error
+    feature_count = None
+    if input_shape:
+        feature_count = next((int(value) for value in reversed(input_shape) if value is not None), None)
+    if feature_count is None:
+        feature_count = getattr(source, "n_features_in_", None)
+    if feature_count is None:
+        raise ValueError("custom sklearn units require a fitted estimator with n_features_in_ or input_shape=")
+    convert_options = {id(source): {"zipmap": False}} if hasattr(source, "classes_") else None
+    onnx_model = convert_sklearn(
+        source,
+        initial_types=[(input_name, FloatTensorType([None, int(feature_count)]))],
+        options=convert_options,
+    )
+    path = _custom_artifact_path(name)
+    path.write_bytes(onnx_model.SerializeToString())
+    return path
+
+
+def _export_torch_to_onnx(
+    source: Any,
+    *,
+    name: str,
+    input_name: str,
+    example_input: Any,
+    input_shape: Sequence[int | None] | None,
+) -> Path:
+    try:
+        import torch  # type: ignore[import-not-found]
+    except ImportError as error:
+        raise ImportError("custom torch units require the optional 'torch' package") from error
+    if example_input is None:
+        if not input_shape:
+            raise ValueError("custom torch units require example_input= or input_shape=")
+        shape = [1 if value is None else int(value) for value in input_shape]
+        example_input = torch.zeros(*shape, dtype=torch.float32)
+    path = _custom_artifact_path(name)
+    source.eval()
+    torch.onnx.export(
+        source,
+        example_input,
+        str(path),
+        input_names=[input_name],
+        output_names=["output"],
+        dynamic_axes={input_name: {0: "batch"}, "output": {0: "batch"}},
+        opset_version=17,
+    )
+    return path
 
 
 def vectorstorage(
@@ -988,7 +1263,7 @@ def _coerce_nested_unit(item: Unit | UnitRequest | None, *, mode: str | None = N
             )
         return item
     if isinstance(item, UnitRequest):
-        item_options = dict(item.options or {})
+        item_options = _options_with_scope_defaults(dict(item.options or {}), resolved_mode)
         raw_quant = item_options.get("quant")
         item_quant = raw_quant if isinstance(raw_quant, str) else None
         if _is_service_unit_type(item.type):

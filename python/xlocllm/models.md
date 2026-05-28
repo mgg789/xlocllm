@@ -1,5 +1,11 @@
 # xlocllm Models Catalog
 
+> Native v1.1 catalog: `packages/catalog/native-models.json` and packaged copy
+> `xlocllm/data/native_models.json` contain 300 native entries. Use
+> `xlocllm.models(mode="native", ...)` for the active default catalog and the
+> filters `subtype=`, `modality=`, `use_case=`, `license=`, and `min_context=`.
+> The browser/WebGPU catalog remains documented below.
+
 Source: `packages/catalog/models.json`, schemaVersion `2`.
 Unit groups: `24`. Models: `217`.
 

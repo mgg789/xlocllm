@@ -45,6 +45,26 @@ print(xlocllm.mode)  # native
 xlocllm.mode = "web"  # явно включить старый browser/WebGPU runtime
 ```
 
+Scoped-режимы можно задавать декораторами или context manager'ами. Они временно
+меняют default для создаваемых внутри `unit(...)`, а после выхода восстанавливают
+предыдущее состояние:
+
+```python
+@xlocllm.webgpu
+def run_webgpu():
+    llm = xlocllm.unit("LLM", "SmolLM2-360M-Instruct-q4f16_1-MLC")
+
+with xlocllm.web:
+    clf = xlocllm.unit("text-classification", "Xenova/distilbert-base-uncased-finetuned-sst-2-english")
+
+with xlocllm.native:
+    llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b")
+```
+
+`xlocllm.webgpu` означает `mode="web"` и default `options.device="webgpu"`.
+`xlocllm.web` означает `mode="web"` и default `options.device="wasm"`.
+`xlocllm.native` возвращает запуск к локальному native runtime.
+
 ## Быстрый старт
 
 ```python
@@ -133,6 +153,29 @@ Service units не требуют модели из каталога. Напри
 создает native ONNX unit; после подключения к запущенному runtime его можно
 вызывать через `unit.predict([[...]])`.
 
+Дополнительные формы:
+
+```python
+info = xlocllm.model("Qwen-3.5-0.8b", unit="LLM")
+llm = xlocllm.unit(info)
+
+clf = xlocllm.unit(
+    sklearn_model,
+    type="text-classification",
+    name="clf",
+    labels=["no", "yes"],
+)
+reg = xlocllm.unit("model.onnx", type="regression", name="reg", input_name="float_input")
+
+with xlocllm.unit(info) as unit:
+    ...
+```
+
+Custom sklearn и torch модели экспортируются в ONNX. В `native` режиме они
+запускаются через ONNX Runtime. В `web` режиме SDK регистрирует ONNX artifact на
+локальном bridge, а связанное browser-окно выполняет модель через ONNX Runtime
+Web/WASM.
+
 ### `xlocllm.vectorstorage(name="default", backend="indexeddb", metric="cosine", persist=True, namespace="default", options=None, mode=None)`
 
 Создает сервисный unit для локального vector storage. В `native` режиме дефолтный
@@ -172,7 +215,7 @@ runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b")], port=12000)
 web_runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b", mode="web")], mode="web")
 ```
 
-### `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False, quant=None)`
+### `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False, quant=None, subtype=None, modality=None, use_case=None, license=None, min_context=None)`
 
 Возвращает модели каталога как `ModelInfo`.
 
@@ -195,6 +238,14 @@ web_runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b", mode="web")]
 - `max_disk_mb`
 - `max_size_gb`
 - `max_parameters_b`
+- `subtype` - подтип внутри класса, например `reasoning`, `chat`,
+  `multilingual-retrieval`, `cross-encoder`, `caption-vqa`
+- `modality` - входная/выходная модальность из `modalities`, например `text`,
+  `image`, `audio`, `speech`
+- `use_case` - сценарий из `useCases`, например `rag`, `agent`, `captioning`,
+  `translation`, `classification`
+- `license` - точное имя лицензии в metadata
+- `min_context` - минимальная длина контекста для LLM/VLM/code моделей
 - `limit_per_unit`
 - `mode` - `"native"` или `"web"`; по умолчанию `xlocllm.mode`
 - `installed` - фильтр по установленным artifacts, если доступны bridge/status данные
@@ -209,7 +260,16 @@ web_runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b", mode="web")]
 small_llms = xlocllm.models(unit="LLM", max_vram_mb=1500, search="qwen")
 native_llms = xlocllm.models(unit="LLM", mode="native")
 cpu_web_models = xlocllm.models(unit="LLM", mode="web", webgpu=False)
+rag_embeddings = xlocllm.models(unit="embedding", mode="native", use_case="rag", modality="text")
+reasoning_llms = xlocllm.models(unit="LLM", mode="native", subtype="reasoning", min_context=8192)
 ```
+
+Native-каталог вынесен в `packages/catalog/native-models.json` и packaged copy
+`xlocllm/data/native_models.json`. Сейчас он содержит 300 записей в разных
+классах: LLM, embeddings, rerankers, VLM, translation, ASR, TTS, OCR, vision,
+classification, summarization, code и другие task-модели. LLM, embeddings,
+reranker и VLM расширены сильнее остальных, чтобы покрыть разные размеры,
+языки, архитектуры и сценарии.
 
 В `web` режиме при `webgpu=False` исключаются MLC/WebLLM модели и тяжелые Transformers.js
 модели. В fallback-каталоге остается минимум одна usable-модель для каждого

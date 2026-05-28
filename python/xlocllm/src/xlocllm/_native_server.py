@@ -276,7 +276,7 @@ class NativeRuntime:
         if unit_type == "rag":
             self.configure_rag_unit(request)
             return self.status()
-        if unit_type == "onnx":
+        if unit_type == "onnx" or is_custom_onnx_request(request):
             self.configure_onnx_unit(request)
             return self.status()
         instance = self.ensure_instance(request)
@@ -339,7 +339,7 @@ class NativeRuntime:
             if route in {"rag.add", "rag.search", "rag.delete", "rag.clear", "rag.reindex", "rag.stats"}:
                 return self.rag_endpoint(route, payload)
             if route in {"onnx", "onnx.predict", "regression", "regression.predict"}:
-                return self.onnx_predict(payload)
+                return custom_prediction_response(self.onnx_predict(payload), payload)
             return self.generic_pipeline(route, payload)
         finally:
             self.requests["processing"] = max(0, self.requests["processing"] - 1)
@@ -393,6 +393,8 @@ class NativeRuntime:
         return {"results": sorted(results, key=lambda item: float(item["score"]), reverse=True)}
 
     def generic_pipeline(self, route: str, payload: dict[str, Any]) -> Any:
+        if is_custom_onnx_payload(payload) or str(payload.get("model") or "") in self.custom_onnx:
+            return custom_prediction_response(self.onnx_predict(payload), payload)
         unit = unit_for_endpoint(route)
         instance = self.instance_for_unit(unit, payload.get("model"))
         pipe = self.ensure_pipeline_loaded(instance)
@@ -423,12 +425,23 @@ class NativeRuntime:
         raw_output_names = payload.get("output_names") or unit.options.get("output_names")
         output_names = [str(item) for item in raw_output_names] if isinstance(raw_output_names, list) else None
         outputs = session.run(output_names, feeds)
+        output_names_for_response = output_names or [output.name for output in session.get_outputs()]
         public_outputs = [output.tolist() if hasattr(output, "tolist") else output for output in outputs]
+        named_outputs = {
+            name: public_outputs[index]
+            for index, name in enumerate(output_names_for_response)
+            if index < len(public_outputs)
+        }
+        preferred_name = next(
+            (name for name in output_names_for_response if "prob" in name.lower() or "score" in name.lower()),
+            output_names_for_response[0] if output_names_for_response else "",
+        )
         return {
             "ok": True,
             "model": unit.name,
             "outputs": public_outputs,
-            "prediction": public_outputs[0] if public_outputs else None,
+            "named_outputs": named_outputs,
+            "prediction": named_outputs.get(preferred_name) if preferred_name else (public_outputs[0] if public_outputs else None),
         }
 
     def vector_endpoint(self, route: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -507,7 +520,7 @@ class NativeRuntime:
             if unit_type == "rag":
                 self.configure_rag_unit(request)
                 continue
-            if unit_type == "onnx":
+            if unit_type == "onnx" or is_custom_onnx_request(request):
                 self.configure_onnx_unit(request)
                 continue
             instance = self.ensure_instance(request)
@@ -1451,6 +1464,40 @@ def normalize_unit_type(value: str) -> str:
     if normalized in {"onnx", "onnxmodel", "onnxruntime", "regression"}:
         return "onnx"
     return value
+
+
+def is_custom_onnx_request(request: dict[str, Any]) -> bool:
+    options = request.get("options")
+    if not isinstance(options, dict):
+        return False
+    return bool(options.get("custom") or options.get("custom_type") == "onnx" or options.get("model_path") or options.get("path"))
+
+
+def is_custom_onnx_payload(payload: dict[str, Any]) -> bool:
+    unit = payload.get("unit")
+    if isinstance(unit, dict) and is_custom_onnx_request(unit):
+        return True
+    return False
+
+
+def custom_prediction_response(prediction: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    unit = payload.get("unit")
+    options = unit.get("options") if isinstance(unit, dict) and isinstance(unit.get("options"), dict) else {}
+    raw_labels = options.get("labels") or payload.get("labels")
+    label_names = [str(item) for item in raw_labels] if isinstance(raw_labels, list) else []
+    raw_prediction = prediction.get("prediction")
+    row = raw_prediction[0] if isinstance(raw_prediction, list) and raw_prediction and isinstance(raw_prediction[0], list) else raw_prediction
+    if not label_names or not isinstance(row, list):
+        return prediction
+    labels = sorted(
+        [
+            {"label": label, "score": float(row[index]) if index < len(row) else 0.0}
+            for index, label in enumerate(label_names)
+        ],
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+    return {**prediction, "labels": labels}
 
 
 def unit_for_endpoint(route: str) -> str:

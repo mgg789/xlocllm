@@ -106,6 +106,34 @@ def test_model_helpers_return_typed_catalog_items() -> None:
     assert any(item.model_id == qwen.model_id for item in small_llms)
 
 
+def test_native_catalog_has_300_valid_entries() -> None:
+    native_models = [item.to_dict() for item in models(mode="native", include_unavailable=True)]
+    model_ids = [item["modelId"] for item in native_models]
+
+    assert len(native_models) == 300
+    assert len(set(model_ids)) == 300
+    for item in native_models:
+        assert item["unit"]
+        assert item["runtime"] == "native"
+        assert item["backend"] in {"llama.cpp", "onnxruntime"}
+        assert item["subtype"]
+        assert item["modalities"]
+        assert item["useCases"]
+        if item.get("format") == "gguf":
+            assert item["quantizations"]["q4"]
+
+
+def test_native_catalog_new_filters() -> None:
+    rag_embeddings = models(unit="embedding", mode="native", use_case="rag", modality="text")
+    long_context_llms = models(unit="LLM", mode="native", min_context=8192)
+    reasoning_llms = models(unit="LLM", mode="native", subtype="reasoning")
+
+    assert len(rag_embeddings) >= 10
+    assert all("rag" in item.to_dict()["useCases"] for item in rag_embeddings)
+    assert long_context_llms
+    assert reasoning_llms
+
+
 def test_native_quant_parameter_selects_files_without_changing_model_id() -> None:
     q4 = xlocllm.unit(type="LLM", model="Qwen-3.5-0.8b")
     q8 = xlocllm.unit(type="LLM", model="Qwen-3.5-0.8b", quant="q8")
@@ -153,3 +181,19 @@ def test_benchmark_recommends_models_for_type_without_browser_probe() -> None:
     assert snapshot["model_type"] == "LLM"
     assert snapshot["recommendations"]["fast"]["unit"] == "LLM"
     assert snapshot["recommendations"]["quality"]["unit"] == "LLM"
+
+
+def test_mode_scope_decorators_restore_mode() -> None:
+    xlocllm.mode = "native"
+
+    with xlocllm.web:
+        web_unit = xlocllm.unit("text-classification", "Xenova/distilbert-base-uncased-finetuned-sst-2-english")
+        assert web_unit.mode == "web"
+        assert web_unit.options["device"] == "wasm"
+
+    with xlocllm.webgpu:
+        llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b")
+        assert llm.mode == "web"
+        assert llm.options["device"] == "webgpu"
+
+    assert xlocllm.unit("LLM", "Qwen-3.5-0.8b").mode == "native"

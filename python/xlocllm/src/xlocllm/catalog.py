@@ -262,7 +262,7 @@ class ModelInfo:
 def load_catalog(mode: str | None = None) -> dict[str, Any]:
     resolved_mode = normalize_mode(mode) if mode is not None else "web"
     if resolved_mode == "native":
-        return build_native_catalog()
+        return load_native_catalog()
     return load_web_catalog()
 
 
@@ -274,6 +274,20 @@ def load_web_catalog() -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     data = resources.files("xlocllm.data").joinpath("models.json").read_text(encoding="utf-8")
     return json.loads(data)
+
+
+@lru_cache(maxsize=1)
+def load_native_catalog() -> dict[str, Any]:
+    root = repo_root_from_here()
+    if root is not None:
+        path = root / "packages" / "catalog" / "native-models.json"
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = resources.files("xlocllm.data").joinpath("native_models.json").read_text(encoding="utf-8")
+        return json.loads(data)
+    except FileNotFoundError:
+        return build_native_catalog()
 
 
 def build_native_catalog() -> dict[str, Any]:
@@ -486,6 +500,11 @@ def models(
     hardware: str | None = None,
     include_unavailable: bool = False,
     quant: str | None = None,
+    subtype: str | None = None,
+    modality: str | None = None,
+    use_case: str | None = None,
+    license: str | None = None,  # noqa: A002
+    min_context: int | None = None,
     search: str | None = None,
     max_vram_mb: int | None = None,
     max_disk_mb: int | None = None,
@@ -496,6 +515,10 @@ def models(
     resolved_mode = current_mode(mode)
     normalized_unit = normalize_unit(unit) if unit is not None else None
     normalized_search = _normalize(search) if search else None
+    normalized_subtype = _normalize(subtype) if subtype else None
+    normalized_modality = _normalize(modality) if modality else None
+    normalized_use_case = _normalize(use_case) if use_case else None
+    normalized_license = _normalize(license) if license else None
     require_cpu_fallback = (webgpu is False) or (cpu is True) or (available_without_webgpu is True)
     cpu_model_ids = cpu_fallback_model_ids(mode=resolved_mode) if require_cpu_fallback else set()
     normalized_hardware = _normalize(hardware) if hardware else None
@@ -528,6 +551,21 @@ def models(
         if provider is not None and _normalize(candidate["provider"]) != _normalize(provider):
             continue
         if availability is not None and _normalize(candidate.get("availability", "")) != _normalize(availability):
+            continue
+        if normalized_subtype is not None and _normalize(str(candidate.get("subtype", ""))) != normalized_subtype:
+            continue
+        if normalized_modality is not None and normalized_modality not in {
+            _normalize(str(value)) for value in candidate.get("modalities", [])
+        }:
+            continue
+        if normalized_use_case is not None and normalized_use_case not in {
+            _normalize(str(value)) for value in candidate.get("useCases", [])
+        }:
+            continue
+        if normalized_license is not None and _normalize(str(candidate.get("license", ""))) != normalized_license:
+            continue
+        context_length = candidate.get("contextLength")
+        if min_context is not None and (not isinstance(context_length, int | float) or int(context_length) < min_context):
             continue
         if npu is not None and bool(candidate.get("npuEligible", False)) is not npu:
             continue

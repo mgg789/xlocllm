@@ -134,6 +134,8 @@ model = xlocllm.model("Qwen-3.5-0.8b", unit="LLM")
 models = xlocllm.models(unit="LLM", max_vram_mb=1500)
 native_models = xlocllm.models(mode="native")
 cpu_models = xlocllm.models(mode="web", webgpu=False)
+rag_embeddings = xlocllm.models(unit="embedding", mode="native", use_case="rag")
+vlms = xlocllm.models(unit="vlm", mode="native", modality="image")
 
 unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", quant="q4", reasoning=None)
 store = xlocllm.vectorstorage("kb")
@@ -178,6 +180,37 @@ with xlocllm.runtime([reg]) as runtime:
     runtime.run()
     print(reg.predict([[1.0, 2.0, 3.0]]))
 ```
+
+The native catalog now contains 300 curated public Hugging Face model entries across
+LLM, embeddings, rerankers, VLM, speech, vision, OCR, translation, and text
+tasks. New filters include `subtype=`, `modality=`, `use_case=`, `license=`,
+and `min_context=`.
+
+Mode decorators are available as both decorators and context managers:
+
+```python
+@xlocllm.webgpu
+def run_webgpu():
+    llm = xlocllm.unit("LLM", "SmolLM2-360M-Instruct-q4f16_1-MLC")
+    ...
+
+with xlocllm.web:
+    clf = xlocllm.unit("text-classification", "Xenova/distilbert-base-uncased-finetuned-sst-2-english")
+```
+
+`unit()` also accepts catalog objects and custom local models:
+
+```python
+info = xlocllm.model("Qwen-3.5-0.8b", unit="LLM")
+llm = xlocllm.unit(info)
+
+classifier = xlocllm.unit(sklearn_model, type="text-classification", name="clf", labels=["no", "yes"])
+onnx_unit = xlocllm.unit("model.onnx", type="regression", name="reg")
+```
+
+Custom sklearn/torch models are exported to ONNX. Native mode runs them through
+ONNX Runtime; web mode serves the artifact to the browser and runs it through
+ONNX Runtime Web/WASM.
 
 CLI:
 

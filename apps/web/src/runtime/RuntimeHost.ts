@@ -14,6 +14,7 @@ import type {
 } from "../types";
 import {
   catalog,
+  normalizeUnit,
   resolveModel,
   supportedModelsForCapabilities,
   supportsCpuFallback,
@@ -401,6 +402,11 @@ export class RuntimeHost {
       case "rerank":
       case "reranker":
         return this.rerank(payload);
+      case "onnx":
+      case "onnx.predict":
+      case "regression":
+      case "regression.predict":
+        return this.onnxPredict(payload);
       case "translate":
       case "translator":
         return this.translate(payload);
@@ -612,6 +618,17 @@ export class RuntimeHost {
     return { features: typeof result?.tolist === "function" ? result.tolist() : result, raw: result };
   }
 
+  private async onnxPredict(payload: any): Promise<any> {
+    const unit = payload.unit as RuntimeUnitRequest | undefined;
+    const modelName = unit?.model ?? payload.model;
+    const instance = await this.getInstanceOrLoad((unit?.type as UnitType | undefined) ?? "text-classification", modelName);
+    if (instance.model.runtime !== "custom" || !instance.pipeline) {
+      throw new Error(`${modelName ?? instance.model.modelId} is not a custom ONNX unit`);
+    }
+    const result = await instance.pipeline(payload.inputs ?? payload.input ?? payload.data, payload);
+    return { ok: true, model: instance.model.modelId, prediction: result.prediction, outputs: result.outputs, labels: result.labels };
+  }
+
   private async vectorAdd(payload: any): Promise<any> {
     const config = this.vectorConfigFromPayload(payload);
     const items = vectorItemsFromPayload(payload);
@@ -821,6 +838,10 @@ export class RuntimeHost {
 
   private async loadModel(model: ModelSpec, installOnly: boolean, target?: RuntimeInstance, batch?: InstallBatch): Promise<RuntimeInstance> {
     this.assertModelSupported(model);
+    if (model.runtime === "custom") {
+      const pipe = await this.loadCustomOnnx(model, target);
+      return this.loadedInstance(model, target, { pipeline: pipe, installed: true, status: installOnly ? "ready" : "running" });
+    }
     if (model.runtime === "mlc") {
       const mlc = await import("@mlc-ai/web-llm");
       const backendModelId = this.backendModelId(model);
@@ -894,7 +915,7 @@ export class RuntimeHost {
     }
     const modelRequests = this.modelRequestsFromUnits(units);
     return modelRequests.map((unit) => {
-      const model = this.requireModel(unit.type, unit.model);
+      const model = isCustomOnnxUnit(unit) ? customModelFromUnit(unit) : this.requireModel(unit.type, unit.model);
       this.ensureRuntimeModel(model, true, unit);
       return model;
     });
@@ -949,8 +970,12 @@ export class RuntimeHost {
   }
 
   private requireModel(unit: string, modelName: string): ModelSpec {
-    const model = resolveModel(unit, modelName);
-    if (!model) throw new Error(`Model not found for unit=${unit} model=${modelName}`);
+    const model = tryResolveModel(unit, modelName);
+    if (!model) {
+      const existing = this.instances.get(modelName);
+      if (existing && normalize(String(existing.model.unit)) === normalize(String(unit))) return existing.model;
+      throw new Error(`Model not found for unit=${unit} model=${modelName}`);
+    }
     this.assertModelSupported(model);
     return model;
   }
@@ -964,7 +989,11 @@ export class RuntimeHost {
         candidate.aliases.some((alias) => normalize(alias) === normalized)
       );
     });
-    if (!model) throw new Error(`Model not found: ${modelName}`);
+    if (!model) {
+      const existing = this.instances.get(modelName);
+      if (existing) return existing.model;
+      throw new Error(`Model not found: ${modelName}`);
+    }
     this.assertModelSupported(model);
     return model;
   }
@@ -981,7 +1010,7 @@ export class RuntimeHost {
 
   private async getInstanceOrLoad(unit: UnitType, modelName?: string): Promise<RuntimeInstance> {
     if (modelName) {
-      const model = resolveModel(unit, modelName);
+      const model = tryResolveModel(unit, modelName);
       if (model) {
         this.assertModelSupported(model);
         const current = this.instances.get(model.modelId);
@@ -994,6 +1023,16 @@ export class RuntimeHost {
         this.running = true;
         this.emit();
         return running;
+      }
+      const custom = this.instances.get(modelName);
+      if (custom) {
+        if (custom.status === "running") return custom;
+        const loaded = await this.loadModel(custom.model, false, custom);
+        const next = { ...loaded, active: true, installed: true, status: "running" as const };
+        this.instances.set(custom.model.modelId, next);
+        this.running = true;
+        this.emit();
+        return next;
       }
     }
 
@@ -1228,12 +1267,14 @@ export class RuntimeHost {
   }
 
   private runtimeBackend(model: ModelSpec): "webgpu" | "wasm" {
+    if (model.runtime === "custom") return "wasm";
     if (this.webgpuAvailable) return "webgpu";
     if (model.runtime === "transformers" && supportsCpuFallback(model)) return "wasm";
     throw new Error(`${model.label} requires WebGPU. Use xlocllm.models(webgpu=False) to list CPU/WASM-capable models.`);
   }
 
   private assertModelSupported(model: ModelSpec): void {
+    if (model.runtime === "custom") return;
     if (model.runtime === "mlc" && !this.webgpuAvailable) {
       throw new Error(`${model.label} uses WebLLM/MLC and requires WebGPU`);
     }
@@ -1279,6 +1320,34 @@ export class RuntimeHost {
     } catch {
       return undefined;
     }
+  }
+
+  private async loadCustomOnnx(model: ModelSpec, target?: RuntimeInstance): Promise<(input: any, payload?: any) => Promise<any>> {
+    const options = target?.options ?? {};
+    const artifactUrl = String(options.artifact_url ?? options.artifactUrl ?? "");
+    if (!artifactUrl) throw new Error(`${model.label} custom ONNX unit has no artifact_url`);
+    const ort = await import("onnxruntime-web");
+    ort.env.wasm.numThreads = 1;
+    const session = await ort.InferenceSession.create(artifactUrl, { executionProviders: ["wasm"] });
+    return async (input: any, payload?: any) => {
+      const inputName = String(options.input_name ?? session.inputNames[0]);
+      const feeds: Record<string, any> = {};
+      if (input && typeof input === "object" && !Array.isArray(input) && !(input instanceof Float32Array)) {
+        for (const [key, value] of Object.entries(input)) feeds[key] = tensorFromArray(ort, value);
+      } else {
+        feeds[inputName] = tensorFromArray(ort, input);
+      }
+      const rawOutputNames = payload?.output_names ?? options.output_names;
+      const outputNames = Array.isArray(rawOutputNames) ? rawOutputNames.map(String) : undefined;
+      const outputs = outputNames ? await session.run(feeds, outputNames as any) : await session.run(feeds);
+      const publicOutputs = Object.fromEntries(
+        Object.entries(outputs).map(([key, value]: [string, any]) => [key, Array.from(value.data ?? [])]),
+      );
+      const firstName = Object.keys(publicOutputs).find((key) => /prob|score/i.test(key)) ?? Object.keys(publicOutputs)[0];
+      const prediction = firstName ? shapeOutput(publicOutputs[firstName], outputs[firstName]?.dims) : null;
+      const labels = labelsFromPrediction(prediction, options.labels);
+      return { outputs: publicOutputs, prediction, labels };
+    };
   }
 
   private async probeNpu(): Promise<void> {
@@ -1422,6 +1491,62 @@ function isRagUnit(unit: RuntimeUnitRequest | Record<string, unknown> | undefine
   return normalizeUnitType(String(unit?.type ?? "")) === "rag";
 }
 
+function isCustomOnnxUnit(unit: RuntimeUnitRequest | Record<string, unknown> | undefined): boolean {
+  const options = unit?.options;
+  if (!options || typeof options !== "object") return false;
+  const typed = options as Record<string, unknown>;
+  return Boolean(typed.custom || typed.custom_type === "onnx" || typed.model_path || typed.path || typed.artifact_url);
+}
+
+function customModelFromUnit(unit: RuntimeUnitRequest): ModelSpec {
+  const options = unit.options ?? {};
+  const unitType = normalizeModelUnit(unit.type);
+  return {
+    unit: unitType,
+    runtime: "custom",
+    backend: "onnxruntime-web",
+    format: "onnx",
+    task: String(options.task ?? unit.type),
+    taskGroup: "Custom",
+    modelId: unit.model,
+    backendModelId: unit.model,
+    aliases: [unit.model],
+    label: String(options.label ?? unit.model),
+    provider: "local",
+    logoKey: "onnx",
+    languages: ["custom"],
+    license: "custom",
+    hardwareTier: "tiny",
+    parameterB: null,
+    modelSizeGb: 0,
+    diskMB: 0,
+    vramMB: 64,
+    dtype: "fp32",
+    tags: ["custom", "onnx", "wasm"],
+    npuEligible: false,
+    availability: "verified",
+  };
+}
+
+function normalizeModelUnit(value: string): UnitType {
+  const raw = normalizeUnitType(value);
+  if (raw === "onnx") return "onnx";
+  if (raw === "regression") return "regression";
+  try {
+    return normalizeUnit(value);
+  } catch {
+    return "text-classification";
+  }
+}
+
+function tryResolveModel(unit: string, modelName: string): ModelSpec | undefined {
+  try {
+    return resolveModel(unit, modelName);
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeUnitType(value: string): string {
   return value.trim().toLowerCase().replace(/[\s_-]+/g, "");
 }
@@ -1452,6 +1577,33 @@ function dedupeModelRequests(requests: RuntimeUnitRequest[]): RuntimeUnitRequest
     result.push(request);
   }
   return result;
+}
+
+function tensorFromArray(ort: any, value: any): any {
+  const rows = Array.isArray(value) && Array.isArray(value[0]) ? value : [value];
+  const width = Array.isArray(rows[0]) ? rows[0].length : 1;
+  const flat = rows.flat().map(Number);
+  return new ort.Tensor("float32", Float32Array.from(flat), [rows.length, width]);
+}
+
+function shapeOutput(values: unknown[], dims: readonly number[] | undefined): unknown {
+  if (!dims || dims.length < 2) return values;
+  const rows = dims[0] || 1;
+  const width = dims.slice(1).reduce((left, right) => left * right, 1);
+  const result = [];
+  for (let row = 0; row < rows; row += 1) {
+    result.push(values.slice(row * width, row * width + width));
+  }
+  return result;
+}
+
+function labelsFromPrediction(prediction: unknown, labels: unknown): Array<{ label: string; score: number }> | undefined {
+  if (!Array.isArray(labels)) return undefined;
+  const row = Array.isArray(prediction) && Array.isArray(prediction[0]) ? prediction[0] : prediction;
+  if (!Array.isArray(row)) return undefined;
+  return labels
+    .map((label, index) => ({ label: String(label), score: Number(row[index] ?? 0) }))
+    .sort((left, right) => right.score - left.score);
 }
 
 function numberOrDefault(value: unknown, fallback: number): number {

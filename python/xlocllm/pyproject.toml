@@ -60,6 +60,7 @@ packages = ["src/xlocllm"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/xlocllm/data/models.json" = "xlocllm/data/models.json"
+"src/xlocllm/data/native_models.json" = "xlocllm/data/native_models.json"
 "src/xlocllm/py.typed" = "xlocllm/py.typed"
 
 [tool.ruff]

@@ -1,6 +1,7 @@
 """Python SDK for xlocllm."""
 
 from ._mode import DEFAULT_MODE
+from ._scopes import native, web, webgpu
 from .bridge import Bridge, BridgeGroup, GetBridge, bridges
 from .benchmark import benchmark
 from .catalog import ModelInfo, cpu_fallback_model_ids, model, models, supports_cpu_fallback, supports_reasoning
@@ -41,6 +42,7 @@ __all__ = [
     "model",
     "mode",
     "models",
+    "native",
     "rag",
     "runtime",
     "runtimes",
@@ -49,5 +51,7 @@ __all__ = [
     "supports_reasoning",
     "unit",
     "vectorstorage",
+    "web",
+    "webgpu",
     "window",
 ]

@@ -2,6 +2,8 @@ export type UnitType =
   | "LLM"
   | "vectorstorage"
   | "RAG"
+  | "onnx"
+  | "regression"
   | "embedding"
   | "reranker"
   | "translator"
@@ -26,7 +28,7 @@ export type UnitType =
   | "text2text"
   | "code";
 
-export type RuntimeKind = "mlc" | "transformers";
+export type RuntimeKind = "mlc" | "transformers" | "custom";
 
 export type HardwareTier = "tiny" | "small" | "medium" | "large";
 
@@ -53,6 +55,8 @@ export interface ModelSpec {
   taskGroup: string;
   modelId: string;
   backendModelId?: string;
+  backend?: string;
+  format?: string;
   aliases: string[];
   label: string;
   provider: string;

@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import time
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ._paths import web_dist_dir
@@ -170,6 +172,7 @@ def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI
     app.state.started_at = time.time()
     app.state.live_time = live_time
     app.state.mini_disconnect_task = None
+    app.state.artifacts = {}
 
     @app.on_event("startup")
     async def schedule_live_time_shutdown() -> None:
@@ -227,12 +230,21 @@ def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI
     async def logs(limit: int = 200) -> dict[str, Any]:
         return {"logs": hub.logs[-limit:]}
 
+    @app.get("/xlocllm/v1/artifacts/{artifact_id}")
+    async def artifact(artifact_id: str) -> FileResponse:
+        path = app.state.artifacts.get(artifact_id)
+        if not path:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+        return FileResponse(path)
+
     @app.post("/xlocllm/v1/runtime/install")
     async def install(payload: dict[str, Any]) -> Any:
+        register_artifacts(app, payload)
         return await safe_rpc(hub, "install", units=list(payload.get("units") or []), timeout=3600)
 
     @app.post("/xlocllm/v1/runtime/run")
     async def run(payload: dict[str, Any]) -> Any:
+        register_artifacts(app, payload)
         return await safe_rpc(hub, "run", units=list(payload.get("units") or []), timeout=1800)
 
     @app.post("/xlocllm/v1/runtime/stop")
@@ -249,6 +261,7 @@ def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI
 
     @app.post("/xlocllm/v1/runtime/reload")
     async def reload_runtime(payload: dict[str, Any]) -> Any:
+        register_artifacts(app, payload)
         await safe_rpc(hub, "stop", timeout=60)
         return await safe_rpc(hub, "run", units=list(payload.get("units") or []), timeout=1800)
 
@@ -258,6 +271,7 @@ def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI
 
     @app.post("/xlocllm/v1/runtime/configure_unit")
     async def configure_unit(payload: dict[str, Any]) -> Any:
+        register_artifacts(app, payload)
         return await safe_rpc(hub, "configure_unit", payload=payload, timeout=300)
 
     @app.post("/xlocllm/v1/models/delete")
@@ -270,6 +284,7 @@ def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI
 
     @app.post("/xlocllm/v1/invoke/{endpoint:path}")
     async def invoke(endpoint: str, payload: dict[str, Any]) -> Any:
+        register_artifacts(app, payload)
         return await safe_rpc(hub, "infer", endpoint=endpoint.replace("/", "."), payload=payload, timeout=1800)
 
     @app.get("/v1/models")
@@ -385,6 +400,36 @@ async def safe_rpc(
         raise
     except RuntimeError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+def register_artifacts(app: FastAPI, payload: Any) -> None:
+    if isinstance(payload, list):
+        for item in payload:
+            register_artifacts(app, item)
+        return
+    if not isinstance(payload, dict):
+        return
+    options = payload.get("options")
+    if isinstance(options, dict):
+        raw_path = options.get("model_path") or options.get("path")
+        if raw_path:
+            path = Path(str(raw_path)).expanduser().resolve()
+            if path.exists() and path.is_file():
+                artifact_id = artifact_id_for(path)
+                app.state.artifacts[artifact_id] = str(path)
+                options["artifact_id"] = artifact_id
+                options["artifact_url"] = f"/xlocllm/v1/artifacts/{artifact_id}"
+    for value in payload.values():
+        if isinstance(value, (dict, list)):
+            register_artifacts(app, value)
+
+
+def artifact_id_for(path: Path) -> str:
+    try:
+        stamp = f"{path}:{path.stat().st_mtime_ns}:{path.stat().st_size}"
+    except OSError:
+        stamp = str(path)
+    return hashlib.sha256(stamp.encode("utf-8")).hexdigest()[:24]
 
 
 def cancel_mini_disconnect_shutdown(app: FastAPI) -> None:

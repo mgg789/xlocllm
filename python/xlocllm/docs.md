@@ -44,6 +44,24 @@ print(xlocllm.mode)  # native
 xlocllm.mode = "web"  # opt into browser/WebGPU mode globally
 ```
 
+Scoped mode helpers are available as decorators and context managers:
+
+```python
+@xlocllm.webgpu
+def run_browser_gpu():
+    llm = xlocllm.unit("LLM", "SmolLM2-360M-Instruct-q4f16_1-MLC")
+
+with xlocllm.web:
+    classifier = xlocllm.unit("text-classification", "Xenova/distilbert-base-uncased-finetuned-sst-2-english")
+
+with xlocllm.native:
+    llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b")
+```
+
+`webgpu` is web mode with `options.device="webgpu"` by default. `web` is web
+mode with `options.device="wasm"` by default. The previous scope is restored
+after the function or `with` block exits.
+
 ## Quick Start
 
 ```python
@@ -105,7 +123,7 @@ Supported OpenAI-like endpoints:
 
 ## Top-Level API
 
-### `xlocllm.unit(type, model, quant=None, reasoning=None, options=None, rag=None, mode=None)`
+### `xlocllm.unit(...)`
 
 Creates a `Unit` by resolving the requested unit type and model name against the
 catalog. `quant` is available for native GGUF LLMs and accepts values such as
@@ -129,6 +147,23 @@ Accepted model names include exact `modelId`, `label`, and catalog aliases.
 Service units do not need a catalog model. `xlocllm.unit("regression", "...",
 options={"model_path": "model.onnx"})` creates a native custom ONNX unit; call
 `unit.predict([[...]])` after the unit is attached to a running runtime.
+
+Additional forms:
+
+```python
+info = xlocllm.model("Qwen-3.5-0.8b", unit="LLM")
+llm = xlocllm.unit(info)
+
+clf = xlocllm.unit(sklearn_model, type="text-classification", name="clf", labels=["no", "yes"])
+reg = xlocllm.unit("model.onnx", type="regression", name="reg", input_name="float_input")
+
+with xlocllm.unit(info) as unit:
+    ...
+```
+
+Custom sklearn and torch models are exported to ONNX. Native mode runs them via
+ONNX Runtime. Web mode registers the ONNX artifact on the local bridge and runs
+it in the paired browser through ONNX Runtime Web/WASM.
 
 ### `xlocllm.vectorstorage(name="default", backend="indexeddb", metric="cosine", persist=True, namespace="default", options=None, mode=None)`
 
@@ -198,6 +233,11 @@ Filters:
 - `include_unavailable` - include native catalog entries even when local engine
   or hardware policy says they are unavailable
 - `quant` - select GGUF quantization metadata for native LLM entries
+- `subtype` - catalog subtype, for example `reasoning`, `cross-encoder`, or `caption-vqa`
+- `modality` - `text`, `image`, or `audio`
+- `use_case` - intended use, for example `rag`, `chat`, `ocr`, or `search-ranking`
+- `license` - exact license filter
+- `min_context` - minimum declared context length
 
 Example:
 
@@ -205,12 +245,18 @@ Example:
 small_llms = xlocllm.models(unit="LLM", max_vram_mb=1500, search="qwen")
 native_llms = xlocllm.models(unit="LLM", mode="native")
 cpu_web_models = xlocllm.models(unit="LLM", mode="web", webgpu=False)
+rag_embeddings = xlocllm.models(unit="embedding", mode="native", use_case="rag")
+vlms = xlocllm.models(unit="vlm", mode="native", modality="image")
 ```
 
 In web mode, `webgpu=False` excludes MLC/WebLLM models and heavy
 Transformers.js models. The fallback catalog keeps at least one usable model for
 every unit class whenever the catalog contains a Transformers.js candidate for
 that class.
+
+The native catalog contains 300 curated public Hugging Face entries with GGUF
+or ONNX metadata. Runtime smoke tests cover representative models, not every
+catalog entry.
 
 ### `xlocllm.model(name, unit=None, mode=None, quant=None)`
 
