@@ -1,8 +1,12 @@
 # xlocllm
 
-`xlocllm` is a Python SDK for local browser-backed AI inference. It exposes an
-OpenAI-compatible loopback API from Python while running model weights in a
-paired browser window through WebGPU/WebNN with MLC WebLLM and Transformers.js.
+`xlocllm` is a Python SDK for local AI inference. The default runtime is
+`native`: Python starts a local supervisor, exposes an OpenAI-compatible
+loopback API, and runs local engines such as llama.cpp/GGUF for LLMs and ONNX
+Runtime for embeddings, rerankers, vision, audio, and other task models.
+
+The browser/WebGPU runtime remains available with `mode="web"` and keeps the
+old browser-backed behavior through MLC WebLLM and Transformers.js.
 
 The goal is simple:
 
@@ -26,13 +30,16 @@ print(runtime.chat("Say hello", temperature=0))
 ## What It Does
 
 - Starts a local FastAPI bridge on `127.0.0.1`.
-- Opens a paired browser app window.
-- Runs models inside the browser runtime.
+- Uses `native` mode by default; use `xlocllm.mode = "web"` or
+  `runtime(..., mode="web")` for the browser runtime.
+- Opens a small dashboard window for status and controls.
+- Runs model engines locally in native mode, or inside the paired browser in web
+  mode.
 - Provides OpenAI-compatible `/v1` endpoints for local clients.
 - Supports LLMs, embeddings, rerankers, translation, TTS, vision, ASR, and more
   through a shared catalog.
-- Provides browser-local RAG with IndexedDB vector storage, embeddings,
-  optional reranking, automatic LLM retrieval, and `runtime.chatui()`.
+- Provides local RAG with vector storage, embeddings, optional reranking,
+  automatic LLM retrieval, and `runtime.chatui()`.
 - Keeps Python-side objects for models, units, runtimes, and bridges.
 
 ## Install
@@ -40,6 +47,10 @@ print(runtime.chat("Say hello", temperature=0))
 ```powershell
 pip install xlocllm
 ```
+
+The package install stays light. In native mode, managed engine dependencies and
+model artifacts are downloaded into the xlocllm cache on the first
+`runtime.run()`.
 
 Optional OpenAI client helper:
 
@@ -96,7 +107,7 @@ With the optional helper:
 client = runtime.client()
 ```
 
-## Browser-Local RAG
+## Local RAG
 
 ```python
 import xlocllm
@@ -107,17 +118,21 @@ llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b-fp32", rag=rag)
 
 with xlocllm.runtime([llm]) as runtime:
     runtime.run()
-    rag.add(["xlocllm keeps vector stores in browser IndexedDB."], ids=["storage"])
+    rag.add(["xlocllm keeps vectors in the active runtime storage."], ids=["storage"])
     print(runtime.chat("Where does xlocllm keep vectors?"))
     runtime.chatui(session="kb-demo")
 ```
+
+Native mode uses local persistent storage. Browser mode uses IndexedDB in the
+paired browser runtime.
 
 ## Core API
 
 ```python
 model = xlocllm.model("Qwen-3.5-0.8b", unit="LLM")
 models = xlocllm.models(unit="LLM", max_vram_mb=1500)
-cpu_models = xlocllm.models(webgpu=False)
+native_models = xlocllm.models(mode="native")
+cpu_models = xlocllm.models(mode="web", webgpu=False)
 
 unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None)
 store = xlocllm.vectorstorage("kb")
@@ -134,9 +149,10 @@ print(xlocllm.benchmark())
 print(xlocllm.benchmark("LLM"))
 ```
 
-`benchmark()` temporarily opens a paired mini browser by default to detect real
-WebGPU/WebNN/NPU support, then closes it. With a unit type, it returns `fast`
-and `quality` recommendations.
+`benchmark()` checks CPU/RAM/disk, native engine availability, GPU/NPU signals,
+and Hugging Face latency. In `mode="web"` it can temporarily open a paired mini
+browser to detect real WebGPU/WebNN/NPU support. With a unit type, it returns
+`fast` and `quality` recommendations.
 
 Reasoning-capable LLMs can be configured at creation and updated hot:
 
@@ -151,8 +167,11 @@ CLI:
 xlocllm status
 xlocllm benchmark
 xlocllm benchmark LLM
-xlocllm models --unit LLM --no-webgpu
+xlocllm benchmark LLM --mode web
+xlocllm models --unit LLM
+xlocllm models --unit LLM --mode web --no-webgpu
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b"
+xlocllm run --unit LLM --model "Qwen-3.5-0.8b" --mode web
 ```
 
 ## Documentation
@@ -177,7 +196,8 @@ Browse the complete catalog in [`models.md`](https://github.com/mgg789/xlocllm/b
 
 ## Local State
 
-By default, xlocllm stores bridge metadata and browser profiles under:
+By default, xlocllm stores bridge metadata, native engine/model cache, vector
+stores, and browser profiles under:
 
 - Windows: `%LOCALAPPDATA%\xlocllm`
 - Linux/macOS: `$XDG_STATE_HOME/xlocllm` or `~/.local/state/xlocllm`
@@ -187,6 +207,8 @@ Environment variables:
 - `XLOCLLM_HOME` - override local state directory.
 - `XLOCLLM_WEB_URL` - use a custom web runtime URL.
 - `XLOCLLM_LOG_LEVEL` - uvicorn log level.
+- `XLOCLLM_NATIVE_DISABLE_INSTALL=1` - disable managed native dependency
+  installation and fail with a diagnostic error instead.
 
 ## Development Checks
 
@@ -205,10 +227,11 @@ python -m build
 
 ## Notes
 
-The bridge binds to loopback only. The browser window must remain open while
-browser-backed models are running. Without WebGPU, xlocllm exposes only the
-CPU/WASM-compatible Transformers.js subset and rejects heavier models before
-loading.
+The bridge binds to loopback only. In native mode, the dashboard window is only
+a monitor/control surface; closing it does not run model weights in the browser.
+In web mode, the browser window must remain open while browser-backed models are
+running. Without WebGPU, web mode exposes only the CPU/WASM-compatible
+Transformers.js subset and rejects heavier models before loading.
 
 ## License
 

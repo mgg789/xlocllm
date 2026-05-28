@@ -1,5 +1,6 @@
 """Python SDK for xlocllm."""
 
+from ._mode import DEFAULT_MODE
 from .bridge import Bridge, BridgeGroup, GetBridge, bridges
 from .benchmark import benchmark
 from .catalog import ModelInfo, cpu_fallback_model_ids, model, models, supports_cpu_fallback, supports_reasoning
@@ -11,9 +12,12 @@ from .exceptions import (
     UnitNotFound,
     XlocLLMError,
 )
+from .native_bridge import NativeBridge
 from .runtime import Runtime, Unit, UnitRuntime, rag, runtime, runtimes, status, unit, vectorstorage
 from .types import UnitRequest
 from .window import window
+
+mode = DEFAULT_MODE
 
 __all__ = [
     "Bridge",
@@ -23,6 +27,7 @@ __all__ = [
     "GetBridge",
     "ModelInfo",
     "ModelNotFound",
+    "NativeBridge",
     "Runtime",
     "RuntimeNotFound",
     "Unit",
@@ -34,6 +39,7 @@ __all__ = [
     "bridges",
     "cpu_fallback_model_ids",
     "model",
+    "mode",
     "models",
     "rag",
     "runtime",

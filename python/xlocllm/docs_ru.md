@@ -1,8 +1,13 @@
 # xlocllm Python SDK
 
-`xlocllm` - локальный Python SDK для запуска моделей в браузере. Python-код
-общается с локальным FastAPI bridge на `127.0.0.1`, а сами модели загружаются и
-исполняются в связанном окне браузера через WebGPU/WebNN, MLC WebLLM или
+`xlocllm` - локальный Python SDK для запуска AI/ML моделей с единым API и двумя
+режимами runtime. По умолчанию используется `native`: Python поднимает локальный
+supervisor, отдает OpenAI-compatible API на `127.0.0.1` и запускает локальные
+engine вроде llama.cpp/GGUF для LLM и ONNX Runtime для embeddings, rerank,
+vision, audio, OCR и других task-моделей.
+
+Старый browser/WebGPU runtime сохранен как `mode="web"`. Он по-прежнему запускает
+модели в связанном окне браузера через WebGPU/WebNN, MLC WebLLM или
 Transformers.js.
 
 ## Установка
@@ -14,8 +19,13 @@ python -m pip install -e .\python\xlocllm
 Метаданные пакета:
 
 - Python: `>=3.10`
-- runtime-зависимости: `fastapi`, `uvicorn[standard]`, `pydantic`
+- базовые runtime-зависимости: `fastapi`, `uvicorn[standard]`, `pydantic`
 - CLI entry points: `xlocllm`, `xlocllm-bridge`
+
+Базовая установка остается легкой. В `native` режиме недостающие engine
+зависимости и model artifacts скачиваются в cache xlocllm при первом
+`runtime.run()`. Чтобы запретить автоустановку native engine и получать явную
+диагностическую ошибку, установите `XLOCLLM_NATIVE_DISABLE_INSTALL=1`.
 
 ## Основные сущности
 
@@ -23,8 +33,17 @@ python -m pip install -e .\python\xlocllm
 
 - `ModelInfo` - запись каталога модели с runtime и hardware-характеристиками.
 - `Unit` - пара capability/model, например `LLM + Qwen`.
-- `Runtime` - набор units, которые надо держать вместе в браузерном runtime.
-- `Bridge` - локальный HTTP/WebSocket процесс между Python и браузером.
+- `Runtime` - набор units, которые надо держать вместе в выбранном runtime.
+- `Bridge` / `NativeBridge` - локальный HTTP процесс управления для выбранного режима.
+
+Глобальный режим:
+
+```python
+import xlocllm
+
+print(xlocllm.mode)  # native
+xlocllm.mode = "web"  # явно включить старый browser/WebGPU runtime
+```
 
 ## Быстрый старт
 
@@ -87,28 +106,30 @@ with xlocllm.runtime([llm]) as runtime:
 
 ## Top-Level API
 
-### `xlocllm.unit(type, model, reasoning=None, options=None, rag=None)`
+### `xlocllm.unit(type, model, reasoning=None, options=None, rag=None, mode=None)`
 
 Создает `Unit`, нормализуя тип и имя модели через каталог.
 `reasoning` включает или выключает thinking/reasoning для LLM-семейств, которые
-это поддерживают. `options` передается в браузерный runtime как настройки unit.
-Для LLM можно передать `rag=<RAG unit>`, тогда chat-запросы будут автоматически
-делать retrieval перед генерацией.
+это поддерживают. `options` передается в выбранный runtime как настройки unit.
+`mode=None` берет `xlocllm.mode`; по умолчанию это `"native"`. Для LLM можно
+передать `rag=<RAG unit>`, тогда chat-запросы будут автоматически делать
+retrieval перед генерацией.
 
 ```python
 unit = xlocllm.unit("chat", "qwen-0.8b")
 print(unit.type)   # LLM
-print(unit.model)  # Qwen3.5-0.8B-q4f16_1-MLC
+print(unit.mode)   # native
 ```
 
 Модель можно указывать через точный `modelId`, `label` или любой alias из
 каталога.
 
-### `xlocllm.vectorstorage(name="default", backend="indexeddb", metric="cosine", persist=True, namespace="default", options=None)`
+### `xlocllm.vectorstorage(name="default", backend="indexeddb", metric="cosine", persist=True, namespace="default", options=None, mode=None)`
 
-Создает сервисный unit для локального vector storage. Первый production backend -
-IndexedDB в браузере. Для временного индекса используйте `persist=False` или
-`backend="memory"`. `metric`: `cosine`, `dot`, `euclidean`.
+Создает сервисный unit для локального vector storage. В `native` режиме дефолтный
+backend автоматически становится native persistent store. В `web` режиме дефолт
+остается browser IndexedDB. Для временного индекса используйте `persist=False`
+или `backend="memory"`. `metric`: `cosine`, `dot`, `euclidean`.
 
 ```python
 store = xlocllm.vectorstorage(name="docs", namespace="kb")
@@ -118,11 +139,11 @@ store = xlocllm.vectorstorage(name="docs", namespace="kb")
 использовать `xlocllm.rag(...)`: он сам чанкует текст, вызывает embedding model
 и пишет векторные записи.
 
-### `xlocllm.rag(emb, rerank=None, store=None, name="default", chunk_size=800, chunk_overlap=120, top_k=5, candidate_k=30, score_threshold=None, options=None)`
+### `xlocllm.rag(emb, rerank=None, store=None, name="default", chunk_size=800, chunk_overlap=120, top_k=5, candidate_k=30, score_threshold=None, options=None, mode=None)`
 
 Создает высокоуровневый RAG unit. `emb` должен быть embedding unit. `rerank`
 опционален и должен быть reranker unit. Если `store` не указан, xlocllm создаст
-IndexedDB store `<name>-store`.
+vector store `<name>-store` в выбранном режиме.
 
 ```python
 emb = xlocllm.unit("embedding", "multilingual-e5-small")
@@ -131,15 +152,18 @@ rag = xlocllm.rag(emb=emb, rerank=rerank, name="kb")
 llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b-fp32", rag=rag)
 ```
 
-### `xlocllm.runtime(units, port=1146, bridge=None, runtime_id=None)`
+### `xlocllm.runtime(units, port=1146, bridge=None, runtime_id=None, mode=None)`
 
-Создает `Runtime` из объектов `Unit` или `UnitRequest`.
+Создает `Runtime` из объектов `Unit` или `UnitRequest`. `mode=None` берет
+`xlocllm.mode`; передайте `mode="web"`, чтобы явно использовать
+browser/WebGPU backend только для этого runtime.
 
 ```python
 runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b")], port=12000)
+web_runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b", mode="web")], mode="web")
 ```
 
-### `xlocllm.models(...)`
+### `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False)`
 
 Возвращает модели каталога как `ModelInfo`.
 
@@ -163,19 +187,25 @@ runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b")], port=12000)
 - `max_size_gb`
 - `max_parameters_b`
 - `limit_per_unit`
+- `mode` - `"native"` или `"web"`; по умолчанию `xlocllm.mode`
+- `installed` - фильтр по установленным artifacts, если доступны bridge/status данные
+- `hardware` - опциональный снимок железа для native-фильтрации
+- `include_unavailable` - показать native-записи даже если engine/hardware policy
+  считает их недоступными
 
 Пример:
 
 ```python
 small_llms = xlocllm.models(unit="LLM", max_vram_mb=1500, search="qwen")
-cpu_models = xlocllm.models(webgpu=False)
+native_llms = xlocllm.models(unit="LLM", mode="native")
+cpu_web_models = xlocllm.models(unit="LLM", mode="web", webgpu=False)
 ```
 
-При `webgpu=False` исключаются MLC/WebLLM модели и тяжелые Transformers.js
+В `web` режиме при `webgpu=False` исключаются MLC/WebLLM модели и тяжелые Transformers.js
 модели. В fallback-каталоге остается минимум одна usable-модель для каждого
 типа unit, если в каталоге есть подходящий Transformers.js кандидат.
 
-### `xlocllm.model(name, unit=None)`
+### `xlocllm.model(name, unit=None, mode=None)`
 
 Возвращает одну модель как `ModelInfo`.
 
@@ -184,6 +214,10 @@ info = xlocllm.model("Qwen-3.5-0.8b", unit="LLM")
 print(info.model_id)
 print(info.to_dict())
 ```
+
+У native-записей в `to_dict()` есть backend-поля вроде `backend`, `format`,
+`repo`, `files`, `quantization`, `providers`, `ram_mb`, `vram_mb`, `disk_mb`,
+`verified`, если они известны.
 
 ### `xlocllm.bridges(active_only=True)`
 
@@ -199,16 +233,18 @@ print(info.to_dict())
 
 - известные bridges;
 - известные runtimes;
-- установленные и запущенные модели, если browser runtime доступен;
-- resource metrics, которые отдает браузер;
+- установленные и запущенные модели, если runtime отдает такие данные;
+- resource metrics, которые отдает backend;
 - количество моделей в каталоге.
 
-### `xlocllm.benchmark(type=None, ping_hf=True, timeout=2.0, browser=True, browser_timeout=15.0, port=None)`
+### `xlocllm.benchmark(type=None, mode=None, ping_hf=True, timeout=2.0, browser=True, browser_timeout=15.0, port=None)`
 
 Возвращает словарь с параметрами системы, RAM, свободным местом на диске,
-browser capabilities и latency до Hugging Face. По умолчанию benchmark поднимает
-временный local bridge и mini browser window, получает реальные
-`webgpu`/`webnn`/`npu` capability и закрывает временные процессы после замера.
+native hardware/engine availability, optional browser capabilities и latency до
+Hugging Face. В native режиме браузер для запуска моделей не нужен. В web режиме
+`browser=True` поднимает временный local bridge и mini browser window, получает
+реальные `webgpu`/`webnn`/`npu` capability и закрывает временные процессы после
+замера.
 
 Если передать `type`, benchmark дополнительно вернет две рекомендации для этого
 unit type:
@@ -232,6 +268,7 @@ llm_fit = xlocllm.benchmark("LLM")
 - `unit.model`
 - `unit.label`
 - `unit.model_info`
+- `unit.mode`
 - `unit.reasoning`
 - `unit.options`
 - `unit.rag` - подключенный RAG unit для LLM, если настроен
@@ -243,8 +280,8 @@ llm_fit = xlocllm.benchmark("LLM")
 - `unit.to_dict()` - payload, label и metadata модели
 - `unit.status()` - состояние unit в attached runtime
 - `unit.remove()` - убрать из attached runtime без удаления cache
-- `unit.delete_cache(bridge=None)` - удалить browser cache модели
-- `unit.delete(delete_cache=True, bridge=None)` - убрать из runtime и при необходимости удалить browser cache
+- `unit.delete_cache(bridge=None)` - удалить cache модели в выбранном backend
+- `unit.delete(delete_cache=True, bridge=None)` - убрать из runtime и при необходимости удалить model cache
 - `unit.set_reasoning(enabled)` - горячо поменять reasoning-настройку для unit
 - `unit.as_runtime(port=1146)` - создать или переиспользовать runtime для одного unit
 - `unit.install(port=1146)`
@@ -265,6 +302,7 @@ llm_fit = xlocllm.benchmark("LLM")
 Свойства:
 
 - `runtime.id`
+- `runtime.mode`
 - `runtime.port`
 - `runtime.base_url` - `http://127.0.0.1:<port>`
 - `runtime.url` - `http://127.0.0.1:<port>/v1`
@@ -300,18 +338,22 @@ llm_fit = xlocllm.benchmark("LLM")
 - `runtime.wait_ready(timeout=None, require_browser=False)`
 
 `runtime.remove_unit()` принимает `unit.id`, `modelId` или тип unit. Если runtime
-запущен и `delete_cache=False`, SDK попросит браузер деактивировать модель. Если
-`delete_cache=True`, SDK дополнительно запросит очистку cache модели.
+запущен и `delete_cache=False`, SDK попросит выбранный backend деактивировать
+модель. Если `delete_cache=True`, SDK дополнительно запросит очистку cache
+модели.
 
 ## RAG и Vector Storage
 
-RAG исполняется внутри связанного browser runtime:
+RAG исполняется внутри активного runtime:
 
-1. `rag.add(...)` чанкует документы в браузере.
+1. `rag.add(...)` чанкует документы.
 2. Настроенный embedding unit считает embedding для каждого chunk.
-3. Векторы и metadata сохраняются в IndexedDB.
+3. Векторы и metadata сохраняются в backend storage выбранного режима.
 4. `rag.search(...)` эмбеддит query, ищет кандидаты, опционально rerank-ит их и
    возвращает `results` плюс собранный `context`.
+
+В native режиме storage локальный и persistent внутри cache xlocllm. В web режиме
+storage хранится в IndexedDB связанного браузерного runtime.
 
 ```python
 emb = xlocllm.unit("embedding", "multilingual-e5-small")
@@ -440,17 +482,36 @@ client = runtime.client()  # требует optional package openai
 - `XLOCLLM_HOME` - переопределяет папку состояния.
 - `XLOCLLM_WEB_URL` - URL web runtime вместо autodiscovery.
 - `XLOCLLM_LOG_LEVEL` - уровень логов uvicorn, по умолчанию `warning`.
+- `XLOCLLM_NATIVE_DISABLE_INSTALL=1` - отключает managed установку native
+  зависимостей и вместо этого возвращает диагностическую ошибку.
 
 Папки состояния по умолчанию:
 
 - Windows: `%LOCALAPPDATA%\xlocllm`
 - Unix-like: `$XDG_STATE_HOME/xlocllm` или `~/.local/state/xlocllm`
 
+Native engines, скачанные model artifacts и native vector storage живут внутри
+этой же папки `XLOCLLM_HOME`.
+
+## Особенности native runtime
+
+Native mode - режим по умолчанию. Dashboard window в native режиме только
+показывает состояние и дает управление: процессы, downloads, queue, loaded units
+и resource metrics. Модели не исполняются в этом окне браузера.
+
+LLM в native режиме используют GGUF через llama.cpp-compatible loading. Остальные
+task-модели используют ONNX Runtime pipelines там, где это возможно. Перед
+запуском install planner проверяет выбранную модель, OS, Python version, hardware
+signals, engine cache и model cache. Если engine или artifact не удалось
+установить/загрузить, ошибка явно показывает backend, model id, OS, Python
+version и cache/diagnostic context. Автоматического fallback в web mode нет.
+
 ## Особенности браузерного runtime
 
-Bridge слушает только `127.0.0.1`. Окно браузера должно оставаться открытым,
-пока работают browser-модели. Python bridge - это локальный слой управления и
-OpenAI-compatible API; веса моделей, cache и inference исполняются в браузере.
+Bridge слушает только `127.0.0.1`. В `mode="web"` окно браузера должно
+оставаться открытым, пока работают browser-модели. Python bridge - это локальный
+слой управления и OpenAI-compatible API; веса моделей, cache и inference
+исполняются в браузере.
 
 Если mini browser runtime отключился во время RPC, bridge ждет reconnect до 30
 секунд и повторяет RPC. Если mini-окно не возвращается за 30 секунд, bridge сам
@@ -476,9 +537,10 @@ llm.set_reasoning(False)
 
 На уровне запроса значения `reasoning`, `enable_thinking` или
 `chat_template_kwargs={"enable_thinking": ...}` переопределяют настройку unit.
-Browser runtime передает `chat_template_kwargs.enable_thinking` в
+Web runtime передает `chat_template_kwargs.enable_thinking` в
 Transformers.js и добавляет Qwen-маркер `/think` или `/no_think` для MLC/WebLLM
-chat, где это нужно.
+chat, где это нужно. Native runtime сохраняет тот же SDK-флаг и применяет его в
+native chat-template path, если выбранная модель заявляет reasoning support.
 
 ## CLI
 
@@ -486,12 +548,16 @@ chat, где это нужно.
 xlocllm status
 xlocllm benchmark
 xlocllm benchmark LLM
+xlocllm benchmark LLM --mode web
 xlocllm benchmark embedding --no-browser --no-hf
-xlocllm models --unit LLM --no-webgpu
+xlocllm models --unit LLM
+xlocllm models --unit LLM --mode web --no-webgpu
 xlocllm model "Qwen-3.5-0.8b-fp32" --unit LLM
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b" --port 1146
+xlocllm run --unit LLM --model "Qwen-3.5-0.8b" --mode web
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b-fp32" --no-reasoning
 xlocllm bridge --port 1146
+xlocllm bridge --mode web --port 1146
 ```
 
 ## Готовые рецепты
@@ -506,22 +572,23 @@ voice assistant, OCR/document intelligence и других частых зада
 
 Доступно напрямую из `xlocllm`:
 
-- `xlocllm.unit(type, model, reasoning=None, options=None, rag=None) -> Unit`
-- `xlocllm.vectorstorage(name="default", ...) -> Unit`
-- `xlocllm.rag(emb, rerank=None, store=None, ...) -> Unit`
-- `xlocllm.runtime(units, port=1146, bridge=None, runtime_id=None) -> Runtime`
-- `xlocllm.model(name, unit=None) -> ModelInfo`
-- `xlocllm.models(...) -> list[ModelInfo]`
-- `xlocllm.bridges(active_only=True) -> list[Bridge]`
+- `xlocllm.mode` - глобальный runtime mode, по умолчанию `"native"`
+- `xlocllm.unit(type, model, reasoning=None, options=None, rag=None, mode=None) -> Unit`
+- `xlocllm.vectorstorage(name="default", ..., mode=None) -> Unit`
+- `xlocllm.rag(emb, rerank=None, store=None, ..., mode=None) -> Unit`
+- `xlocllm.runtime(units, port=1146, bridge=None, runtime_id=None, mode=None) -> Runtime`
+- `xlocllm.model(name, unit=None, mode=None) -> ModelInfo`
+- `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False) -> list[ModelInfo]`
+- `xlocllm.bridges(active_only=True) -> list[Bridge | NativeBridge]`
 - `xlocllm.runtimes(active_only=True) -> list[Runtime]`
 - `xlocllm.status() -> dict`
-- `xlocllm.benchmark(type=None, ...) -> dict`
+- `xlocllm.benchmark(type=None, mode=None, ...) -> dict`
 - `xlocllm.cpu_fallback_model_ids() -> set[str]`
 - `xlocllm.supports_cpu_fallback(model_dict) -> bool`
 - `xlocllm.supports_reasoning(model_dict) -> bool`
 - `xlocllm.window(...) -> WindowHandle`
 - `xlocllm.GetBridge(port=None) -> Bridge | BridgeGroup`
-- классы: `Bridge`, `BridgeGroup`, `ModelInfo`, `Runtime`, `Unit`, `UnitRequest`
+- классы: `Bridge`, `NativeBridge`, `BridgeGroup`, `ModelInfo`, `Runtime`, `Unit`, `UnitRequest`
 - исключения: `XlocLLMError`, `BridgeNotReady`, `BrowserNotConnected`,
   `ModelNotFound`, `RuntimeNotFound`, `UnitNotFound`
 
@@ -533,7 +600,8 @@ voice assistant, OCR/document intelligence и других частых зада
 
 - `data: dict[str, Any]` - исходный объект каталога.
 - `unit: str` - тип unit, например `LLM` или `embedding`.
-- `runtime: str` - backend family: `mlc` или `transformers`.
+- `runtime: str` - backend family: `native`, `mlc` или `transformers`.
+- `mode: str | None` - режим каталога, если поле задано.
 - `task: str` - backend task.
 - `model_id: str` - точный id модели для `unit()`.
 - `label: str` - человекочитаемое имя.
@@ -558,7 +626,7 @@ voice assistant, OCR/document intelligence и других частых зада
 Обычно создается так:
 
 ```python
-unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None, rag=None)
+unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None, rag=None, mode=None)
 ```
 
 Свойства:
@@ -566,6 +634,7 @@ unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None, rag=No
 - `type: str` - нормализованный тип unit.
 - `model: str` - точный resolved model id.
 - `model_info: ModelInfo | None` - запись каталога.
+- `mode: str | None` - выбранный runtime mode.
 - `reasoning: bool | None` - настройка reasoning для поддерживающих LLM.
 - `options: dict[str, Any]` - runtime options для unit.
 - `rag: Unit | None` - подключенный RAG service для LLM units.
@@ -583,13 +652,13 @@ unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None, rag=No
   Возвращает состояние attached runtime; если unit не attached, возвращает
   offline selected-state.
 - `remove() -> dict[str, Any]`
-  Убирает unit из attached runtime без удаления browser cache.
+  Убирает unit из attached runtime без удаления model cache.
 - `delete(delete_cache=True, bridge=None) -> dict[str, Any]`
   Если unit attached, убирает его из runtime. Если `delete_cache=True`, просит
-  bridge удалить browser cache модели. Для `RAG` и `vectorstorage`
+  выбранный bridge удалить model cache. Для `RAG` и `vectorstorage`
   `delete(ids=None, filter=None)` удаляет документы или vector records.
 - `delete_cache(bridge=None) -> dict[str, Any]`
-  Удаляет browser-side cache модели через bridge.
+  Удаляет cache модели в выбранном backend через bridge.
 - `set_reasoning(enabled) -> dict[str, Any]`
   Меняет local setting и пушит изменение в running runtime, если unit attached.
 - `as_runtime(port=1146) -> Runtime`
@@ -613,7 +682,7 @@ unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None, rag=No
 - `clear(**params) -> dict[str, Any]`
   Очищает namespace RAG/vector store.
 - `stats() -> dict[str, Any]`
-  Возвращает статистику vector/RAG storage из browser runtime.
+  Возвращает статистику vector/RAG storage из активного runtime.
 - `reindex(**params) -> dict[str, Any]`
   Переэмбеддит существующие RAG chunks текущей embedding model.
 
@@ -624,7 +693,7 @@ unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None, rag=No
 Конструктор:
 
 ```python
-Runtime(units, *, port=1146, bridge=None, runtime_id=None)
+Runtime(units, *, port=1146, bridge=None, runtime_id=None, mode=None)
 ```
 
 Обычно используйте `xlocllm.runtime(...)`.
@@ -632,9 +701,10 @@ Runtime(units, *, port=1146, bridge=None, runtime_id=None)
 Свойства:
 
 - `id: str` - runtime registry id.
+- `mode: str` - выбранный runtime mode: `"native"` или `"web"`.
 - `port: int` - порт bridge.
-- `bridge: Bridge | None` - связанный bridge.
-- `window_handle: WindowHandle | None` - окно браузера, если его открыл SDK.
+- `bridge: Bridge | NativeBridge | None` - связанный bridge.
+- `window_handle: WindowHandle | None` - dashboard/browser window, если его открыл SDK.
 - `installed: bool` - Python-side флаг установки.
 - `running: bool` - Python-side флаг запуска.
 - `base_url: str` - base URL bridge, например `http://127.0.0.1:1146`.
@@ -645,38 +715,38 @@ Runtime(units, *, port=1146, bridge=None, runtime_id=None)
 
 - `add_unit(unit, activate=True) -> Unit`
   Добавляет `Unit` или `UnitRequest`. Если runtime уже работает и bridge
-  attached, `activate=True` попросит браузер запустить модель.
+  attached, `activate=True` попросит выбранный backend запустить модель.
 - `remove_unit(unit_id, delete_cache=False) -> dict[str, Any]`
   Удаляет unit по `unit.id`, model id или типу unit. С `delete_cache=True`
   просит bridge удалить cache модели.
 - `configure_unit(unit_id, reasoning=None, options=None) -> dict[str, Any]`
-  Меняет options unit. Если runtime запущен, отправляет hot update в браузер.
+  Меняет options unit. Если runtime запущен, отправляет hot update в активный backend.
 - `set_reasoning(unit_id, enabled) -> dict[str, Any]`
   Shortcut для `configure_unit(..., reasoning=enabled)`.
 - `unit_status(unit_id) -> dict[str, Any]`
-  Возвращает лучшее доступное состояние unit из browser runtime.
+  Возвращает лучшее доступное состояние unit из активного backend.
 - `units(as_dict=False, state=False) -> list[Any]`
-  Возвращает configured `Unit`, dict-представления или browser-reported states.
+  Возвращает configured `Unit`, dict-представления или backend-reported states.
 - `models() -> list[dict[str, Any]]`
-  Возвращает browser runtime model states, если доступны, иначе configured units.
+  Возвращает backend model states, если доступны, иначе configured units.
 - `install(port=None) -> dict[str, Any]`
-  Запускает bridge daemon, открывает browser window, ждет pairing и просит
-  установить модели.
+  Запускает bridge daemon и просит установить engines/models. В web режиме
+  открывает browser window и ждет pairing; в native режиме открывает dashboard.
 - `run(port=None) -> dict[str, Any]`
   Гарантирует install и запускает все configured units.
 - `stop() -> dict[str, Any]`
-  Останавливает browser models и закрывает owned browser window.
+  Останавливает модели и закрывает owned dashboard/browser window.
 - `hibernate() -> dict[str, Any]`
   Выгружает active models, оставляя их selected.
 - `heatup() -> dict[str, Any]`
   Запускает active models и делает warmup для поддерживаемых units.
 - `status() -> dict[str, Any]`
-  Возвращает runtime id, URL, configured units, bridge process info и browser
+  Возвращает runtime id, URL, configured units, bridge process info и backend
   status snapshot, если bridge reachable.
 - `health() -> dict[str, Any]`
   Возвращает bridge health.
 - `logs(limit=200) -> list[dict[str, Any]]`
-  Возвращает логи bridge/browser runtime.
+  Возвращает логи bridge/backend runtime.
 - `invoke(endpoint, payload, timeout=None) -> dict[str, Any]`
   Вызывает `/xlocllm/v1/invoke/{endpoint}`.
 - `client(api_key="xlocllm", **kwargs) -> Any`
@@ -688,19 +758,20 @@ Runtime(units, *, port=1146, bridge=None, runtime_id=None)
 - `embed(input, model=None) -> list[Any]`
   Shortcut для `embeddings`.
 - `open() -> WindowHandle`
-  Открывает или переоткрывает browser UI для attached bridge.
+  Открывает или переоткрывает native dashboard или browser UI для attached bridge.
 - `chatui(model=None, session="default", use_rag=True, open_browser=True, width=760, height=860) -> WindowHandle`
-  Открывает browser chat window, привязанный к running runtime.
+  Открывает chat window, привязанный к running runtime.
 - `close() -> dict[str, Any]`
   Останавливает bridge и удаляет runtime registry state.
 - `wait_ready(timeout=None, require_browser=False) -> Runtime`
-  Ждет доступности bridge и опционально browser pairing.
+  Ждет доступности bridge и опционально browser pairing в web mode.
 - `__enter__() -> Runtime`, `__exit__(...) -> False`
   Поддержка `with` для cleanup bridge/window.
 
-### `Bridge`
+### `Bridge` / `NativeBridge`
 
-`Bridge` - локальный HTTP/WebSocket control plane.
+`Bridge` - локальный HTTP/WebSocket control plane для web mode. `NativeBridge` -
+локальный control plane для native mode с тем же основным API.
 
 Конструктор:
 
@@ -729,27 +800,27 @@ Bridge(port=1146, ttl=None, live_time=None)
 - `health() -> dict[str, Any]`
   Вызывает `/health`.
 - `models() -> list[dict[str, Any]]`
-  Возвращает видимый браузеру каталог моделей из bridge или local fallback.
+  Возвращает видимый backend каталог моделей из bridge или local fallback.
 - `units() -> list[dict[str, Any]]`
   Возвращает unit definitions из bridge или local fallback.
 - `logs(limit=200) -> list[dict[str, Any]]`
-  Возвращает bridge/browser logs.
+  Возвращает bridge/backend logs.
 - `wait_ready(timeout=None, require_browser=False) -> Bridge`
   Ждет health bridge и опционально pairing браузера.
 - `reload(units=None) -> dict[str, Any]`
-  Останавливает и перезапускает browser runtime с переданными units.
+  Останавливает и перезапускает backend runtime с переданными units.
 - `set_active(unit, active=True, model=None) -> dict[str, Any]`
   При `active=True` запускает модель; при `active=False` деактивирует модель
   через `runtime/set_active`.
 - `delete_model(unit_or_model, model=None) -> dict[str, Any]`
-  Запрашивает удаление browser-side cache модели.
+  Запрашивает удаление model cache.
 - `delete_all_models(confirm=True) -> dict[str, Any]`
-  Удаляет все известные browser-side cache entries. При `confirm=False` кидает
+  Удаляет все известные model cache entries. При `confirm=False` кидает
   исключение.
 - `invoke(endpoint, payload, timeout=None) -> dict[str, Any]`
   Вызывает `/xlocllm/v1/invoke/{endpoint}`.
 - `processes() -> dict[str, Any]`
-  Возвращает PID bridge и browser window, а также alive flags.
+  Возвращает PID bridge и window/dashboard, а также alive flags.
 
 ### `BridgeGroup`
 

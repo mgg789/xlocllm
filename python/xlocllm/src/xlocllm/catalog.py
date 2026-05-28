@@ -8,11 +8,167 @@ from pathlib import Path
 from typing import Any
 
 from ._paths import repo_root_from_here
+from ._mode import current_mode, normalize_mode
 from .exceptions import ModelNotFound, UnitNotFound
 
 CPU_FALLBACK_TIERS = {"tiny", "small"}
 CPU_FALLBACK_MAX_VRAM_MB = 1500
 CPU_FALLBACK_MAX_DISK_MB = 1600
+NATIVE_MODELS_PER_UNIT = 4
+NATIVE_PRIORITY_ALIASES: dict[str, list[str]] = {
+    "embedding": ["multilingual-e5-small", "all-MiniLM-L6-v2"],
+    "reranker": ["bge-reranker-v2-m3", "bge-reranker-base"],
+    "translator": ["opus-en-ru", "nllb-200"],
+    "tts": ["kokoro", "speecht5"],
+    "image-classification": ["mobilenet", "vit-base-224"],
+    "object-detection": ["yolos-tiny", "detr"],
+    "image-segmentation": ["modnet", "ben2"],
+    "depth-estimation": ["depth-anything-small", "midas"],
+    "vlm": ["blip", "git-base"],
+    "asr": ["whisper-tiny", "whisper-base"],
+    "ocr": ["trocr", "ocr"],
+    "text-classification": ["sentiment", "toxic"],
+    "ner": ["bert-ner", "token-classification"],
+    "summarization": ["distilbart", "rut5"],
+    "text2text": ["t5-small", "flan-t5-small"],
+    "code": ["codebert-base", "codebert-javascript"],
+}
+
+
+NATIVE_LLM_MODELS: list[dict[str, Any]] = [
+    {
+        "unit": "LLM",
+        "runtime": "native",
+        "backend": "llama.cpp",
+        "format": "gguf",
+        "task": "text-generation",
+        "taskGroup": "LLM",
+        "modelId": "Qwen3-0.6B-Q4_K_M-GGUF",
+        "backendModelId": "Qwen/Qwen3-0.6B-GGUF",
+        "repo": "Qwen/Qwen3-0.6B-GGUF",
+        "files": ["*Q4_K_M*.gguf", "*Q4*.gguf", "*.gguf"],
+        "aliases": [
+            "Qwen-3.5-0.8b",
+            "Qwen-3.5-0.8b-full",
+            "Qwen-3.5-0.8b-fp32",
+            "Qwen3.5-0.8B-q4f16_1-MLC",
+            "Qwen3.5-0.8B-fp32-ONNX",
+            "qwen3-0.6b",
+            "qwen-native-small",
+        ],
+        "label": "Qwen3 0.6B GGUF q4",
+        "provider": "Qwen",
+        "logoKey": "model",
+        "languages": ["multilingual"],
+        "license": "apache-2.0",
+        "hardwareTier": "small",
+        "parameterB": 0.6,
+        "modelSizeGb": 0.45,
+        "diskMB": 480,
+        "vramMB": 900,
+        "dtype": "Q4_K_M",
+        "quantization": "Q4_K_M",
+        "providers": ["cuda", "metal", "vulkan", "cpu"],
+        "npuEligible": False,
+        "availability": "verified",
+        "verified": True,
+        "notes": "Small native GGUF chat model for fast local smoke tests and low-memory devices.",
+        "tags": ["native", "llama.cpp", "gguf", "reasoning"],
+    },
+    {
+        "unit": "LLM",
+        "runtime": "native",
+        "backend": "llama.cpp",
+        "format": "gguf",
+        "task": "text-generation",
+        "taskGroup": "LLM",
+        "modelId": "SmolLM2-360M-Instruct-Q4_K_M-GGUF",
+        "backendModelId": "bartowski/SmolLM2-360M-Instruct-GGUF",
+        "repo": "bartowski/SmolLM2-360M-Instruct-GGUF",
+        "files": ["*Q4_K_M*.gguf", "*Q4*.gguf", "*.gguf"],
+        "aliases": ["SmolLM2-360M", "smollm2", "smollm2-native"],
+        "label": "SmolLM2 360M Instruct GGUF",
+        "provider": "HuggingFaceTB",
+        "logoKey": "huggingface",
+        "languages": ["en"],
+        "license": "apache-2.0",
+        "hardwareTier": "tiny",
+        "parameterB": 0.36,
+        "modelSizeGb": 0.28,
+        "diskMB": 300,
+        "vramMB": 650,
+        "dtype": "Q4_K_M",
+        "quantization": "Q4_K_M",
+        "providers": ["cuda", "metal", "vulkan", "cpu"],
+        "npuEligible": False,
+        "availability": "verified",
+        "verified": True,
+        "notes": "Very small native chat model for CPU-first checks.",
+        "tags": ["native", "llama.cpp", "gguf"],
+    },
+    {
+        "unit": "LLM",
+        "runtime": "native",
+        "backend": "llama.cpp",
+        "format": "gguf",
+        "task": "text-generation",
+        "taskGroup": "LLM",
+        "modelId": "Llama-3.2-1B-Instruct-Q4_K_M-GGUF",
+        "backendModelId": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+        "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+        "files": ["*Q4_K_M*.gguf", "*Q4*.gguf", "*.gguf"],
+        "aliases": ["Llama-3.2-1b", "llama-1b", "llama-native-small"],
+        "label": "Llama 3.2 1B Instruct GGUF",
+        "provider": "Meta",
+        "logoKey": "model",
+        "languages": ["en", "multilingual"],
+        "license": "llama3.2",
+        "hardwareTier": "small",
+        "parameterB": 1.0,
+        "modelSizeGb": 0.75,
+        "diskMB": 820,
+        "vramMB": 1400,
+        "dtype": "Q4_K_M",
+        "quantization": "Q4_K_M",
+        "providers": ["cuda", "metal", "vulkan", "cpu"],
+        "npuEligible": False,
+        "availability": "verified",
+        "verified": True,
+        "notes": "Small general native chat model.",
+        "tags": ["native", "llama.cpp", "gguf"],
+    },
+    {
+        "unit": "LLM",
+        "runtime": "native",
+        "backend": "llama.cpp",
+        "format": "gguf",
+        "task": "text-generation",
+        "taskGroup": "LLM",
+        "modelId": "Phi-3.5-mini-instruct-Q4_K_M-GGUF",
+        "backendModelId": "bartowski/Phi-3.5-mini-instruct-GGUF",
+        "repo": "bartowski/Phi-3.5-mini-instruct-GGUF",
+        "files": ["*Q4_K_M*.gguf", "*Q4*.gguf", "*.gguf"],
+        "aliases": ["Phi-4-mini", "phi4-mini", "phi3.5-mini-native"],
+        "label": "Phi 3.5 mini Instruct GGUF",
+        "provider": "Microsoft",
+        "logoKey": "microsoft",
+        "languages": ["en", "multilingual"],
+        "license": "mit",
+        "hardwareTier": "medium",
+        "parameterB": 3.8,
+        "modelSizeGb": 2.4,
+        "diskMB": 2600,
+        "vramMB": 4200,
+        "dtype": "Q4_K_M",
+        "quantization": "Q4_K_M",
+        "providers": ["cuda", "metal", "vulkan", "cpu"],
+        "npuEligible": False,
+        "availability": "verified",
+        "verified": True,
+        "notes": "Quality native small model for stronger local chat.",
+        "tags": ["native", "llama.cpp", "gguf"],
+    },
+]
 
 
 @dataclass(frozen=True)
@@ -77,8 +233,16 @@ class ModelInfo:
         return dict(self.data)
 
 
+@lru_cache(maxsize=2)
+def load_catalog(mode: str | None = None) -> dict[str, Any]:
+    resolved_mode = normalize_mode(mode) if mode is not None else "web"
+    if resolved_mode == "native":
+        return build_native_catalog()
+    return load_web_catalog()
+
+
 @lru_cache(maxsize=1)
-def load_catalog() -> dict[str, Any]:
+def load_web_catalog() -> dict[str, Any]:
     root = repo_root_from_here()
     if root is not None:
         path = root / "packages" / "catalog" / "models.json"
@@ -87,15 +251,85 @@ def load_catalog() -> dict[str, Any]:
     return json.loads(data)
 
 
-def all_models() -> list[dict[str, Any]]:
-    return list(load_catalog()["models"])
+def build_native_catalog() -> dict[str, Any]:
+    web_catalog = load_web_catalog()
+    result: dict[str, Any] = {
+        "schemaVersion": 3,
+        "mode": "native",
+        "units": list(web_catalog["units"]),
+        "models": [],
+    }
+    result["models"].extend(dict(item) for item in NATIVE_LLM_MODELS)
+    for unit in result["units"]:
+        unit_type = str(unit["type"])
+        if unit_type == "LLM":
+            continue
+        candidates = [
+            candidate
+            for candidate in web_catalog["models"]
+            if candidate.get("unit") == unit_type
+            and candidate.get("runtime") == "transformers"
+            and candidate.get("availability") != "unsupported"
+        ]
+        selected = prioritized_native_candidates(unit_type, candidates)
+        for candidate in selected:
+            result["models"].append(native_onnx_model(candidate))
+    return result
 
 
-def all_units() -> list[dict[str, Any]]:
-    return list(load_catalog()["units"])
+def prioritized_native_candidates(unit_type: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for alias in NATIVE_PRIORITY_ALIASES.get(unit_type, []):
+        normalized = _normalize(alias)
+        match = next(
+            (
+                candidate
+                for candidate in candidates
+                if normalized
+                in {
+                    _normalize(str(candidate.get("modelId", ""))),
+                    _normalize(str(candidate.get("label", ""))),
+                    *[_normalize(str(item)) for item in candidate.get("aliases", [])],
+                }
+            ),
+            None,
+        )
+        if match is not None and match not in selected:
+            selected.append(match)
+    for candidate in sorted(candidates, key=_model_weight):
+        if candidate not in selected:
+            selected.append(candidate)
+        if len(selected) >= NATIVE_MODELS_PER_UNIT:
+            break
+    return selected[:NATIVE_MODELS_PER_UNIT]
+
+
+def all_models(mode: str | None = None) -> list[dict[str, Any]]:
+    return list(load_catalog(mode or current_mode())["models"])
+
+
+def all_units(mode: str | None = None) -> list[dict[str, Any]]:
+    return list(load_catalog(mode or current_mode())["units"])
+
+
+def native_onnx_model(candidate: dict[str, Any]) -> dict[str, Any]:
+    item = dict(candidate)
+    item["runtime"] = "native"
+    item["backend"] = "onnxruntime"
+    item["format"] = "onnx"
+    item["backendModelId"] = candidate.get("backendModelId") or candidate.get("modelId")
+    item["repo"] = candidate.get("backendModelId") or candidate.get("modelId")
+    item["providers"] = ["cuda", "directml", "coreml", "cpu"]
+    item["verified"] = candidate.get("availability") == "verified"
+    item["availability"] = "verified" if item["verified"] else candidate.get("availability", "candidate")
+    item["notes"] = str(candidate.get("notes") or "Native ONNX Runtime pipeline candidate.")
+    item["tags"] = sorted({*[str(tag) for tag in candidate.get("tags", [])], "native", "onnxruntime"})
+    return item
 
 
 def supports_cpu_fallback(candidate: dict[str, Any]) -> bool:
+    if candidate.get("runtime") == "native":
+        return True
     if candidate.get("runtime") != "transformers":
         return False
     if candidate.get("availability") == "unsupported":
@@ -123,11 +357,13 @@ def supports_reasoning(candidate: dict[str, Any]) -> bool:
     return any(marker in haystack for marker in ("qwen3", "qwen3.5", "qwen3_5", "deepseek-r1", "gpt-oss", "qwq"))
 
 
-def cpu_fallback_model_ids(*, min_per_unit: int = 2) -> set[str]:
-    result = {str(candidate["modelId"]) for candidate in all_models() if supports_cpu_fallback(candidate)}
-    for unit in all_units():
+def cpu_fallback_model_ids(*, min_per_unit: int = 2, mode: str | None = None) -> set[str]:
+    resolved_mode = current_mode(mode)
+    catalog_models = all_models(mode=resolved_mode)
+    result = {str(candidate["modelId"]) for candidate in catalog_models if supports_cpu_fallback(candidate)}
+    for unit in all_units(mode=resolved_mode):
         unit_type = str(unit["type"])
-        available = [candidate for candidate in all_models() if candidate["unit"] == unit_type]
+        available = [candidate for candidate in catalog_models if candidate["unit"] == unit_type]
         if len([candidate for candidate in available if str(candidate["modelId"]) in result]) >= min_per_unit:
             continue
         fallback = sorted(
@@ -142,10 +378,11 @@ def cpu_fallback_model_ids(*, min_per_unit: int = 2) -> set[str]:
     return result
 
 
-def resolve_model(unit_type: str, model_name: str) -> dict[str, Any]:
+def resolve_model(unit_type: str, model_name: str, *, mode: str | None = None) -> dict[str, Any]:
+    resolved_mode = current_mode(mode)
     normalized_unit = normalize_unit(unit_type)
     normalized_model = _normalize(model_name)
-    for model in all_models():
+    for model in all_models(mode=resolved_mode):
         if model["unit"] != normalized_unit:
             continue
         aliases = [_normalize(alias) for alias in model.get("aliases", [])]
@@ -155,14 +392,15 @@ def resolve_model(unit_type: str, model_name: str) -> dict[str, Any]:
             *aliases,
         }:
             return model
-    raise ModelNotFound(f"Model not found for unit={unit_type!r} model={model_name!r}")
+    raise ModelNotFound(f"Model not found for unit={unit_type!r} model={model_name!r} mode={resolved_mode!r}")
 
 
-def model(name: str, unit: str | None = None) -> ModelInfo:
+def model(name: str, unit: str | None = None, *, mode: str | None = None) -> ModelInfo:
+    resolved_mode = current_mode(mode)
     if unit is not None:
-        return ModelInfo(resolve_model(unit, name))
+        return ModelInfo(resolve_model(unit, name, mode=resolved_mode))
     normalized_model = _normalize(name)
-    for candidate in all_models():
+    for candidate in all_models(mode=resolved_mode):
         aliases = [_normalize(alias) for alias in candidate.get("aliases", [])]
         if normalized_model in {
             _normalize(candidate["modelId"]),
@@ -170,12 +408,13 @@ def model(name: str, unit: str | None = None) -> ModelInfo:
             *aliases,
         }:
             return ModelInfo(candidate)
-    raise ModelNotFound(f"Model not found: {name!r}")
+    raise ModelNotFound(f"Model not found: {name!r} mode={resolved_mode!r}")
 
 
 def models(
     *,
     unit: str | None = None,
+    mode: str | None = None,
     runtime: str | None = None,
     task: str | None = None,
     task_group: str | None = None,
@@ -187,6 +426,9 @@ def models(
     webgpu: bool | None = None,
     cpu: bool | None = None,
     available_without_webgpu: bool | None = None,
+    installed: bool | None = None,
+    hardware: str | None = None,
+    include_unavailable: bool = False,
     search: str | None = None,
     max_vram_mb: int | None = None,
     max_disk_mb: int | None = None,
@@ -194,17 +436,27 @@ def models(
     max_parameters_b: float | None = None,
     limit_per_unit: int | None = None,
 ) -> list[ModelInfo]:
+    resolved_mode = current_mode(mode)
     normalized_unit = normalize_unit(unit) if unit is not None else None
     normalized_search = _normalize(search) if search else None
     require_cpu_fallback = (webgpu is False) or (cpu is True) or (available_without_webgpu is True)
-    cpu_model_ids = cpu_fallback_model_ids() if require_cpu_fallback else set()
+    cpu_model_ids = cpu_fallback_model_ids(mode=resolved_mode) if require_cpu_fallback else set()
+    normalized_hardware = _normalize(hardware) if hardware else None
     result: list[ModelInfo] = []
-    for candidate in all_models():
+    for candidate in all_models(mode=resolved_mode):
         if normalized_unit is not None and candidate["unit"] != normalized_unit:
+            continue
+        if not include_unavailable and candidate.get("availability") == "unsupported":
+            continue
+        if installed is not None and _model_cache_exists(candidate, mode=resolved_mode) is not installed:
             continue
         if require_cpu_fallback and str(candidate["modelId"]) not in cpu_model_ids:
             continue
         if runtime is not None and _normalize(candidate["runtime"]) != _normalize(runtime):
+            continue
+        if normalized_hardware is not None and normalized_hardware not in {
+            _normalize(str(provider)) for provider in candidate.get("providers", [])
+        }:
             continue
         if task is not None and _normalize(candidate["task"]) != _normalize(task):
             continue
@@ -253,6 +505,18 @@ def models(
     if limit_per_unit is not None:
         result = _limit_models_per_unit(result, limit_per_unit)
     return result
+
+
+def _model_cache_exists(candidate: dict[str, Any], *, mode: str) -> bool:
+    if mode != "native":
+        return False
+    repo = str(candidate.get("repo") or candidate.get("backendModelId") or candidate.get("modelId") or "")
+    if not repo:
+        return False
+    from ._paths import native_model_dir
+
+    hf_cache_name = "models--" + repo.replace("/", "--")
+    return (native_model_dir() / hf_cache_name).exists()
 
 
 def normalize_unit(unit_type: str) -> str:

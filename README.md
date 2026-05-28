@@ -1,18 +1,28 @@
 # xlocllm
 
-`xlocllm` is a local browser inference manager for AI/ML models, runnig from python or typescript (soon). xlocllm uses WebGPU and NPU to run models. This is one of the easiest ways to run LLM on your PC. Created by Droidje AI.
+`xlocllm` is a local inference manager for AI/ML models from Python. The default
+runtime is now `native`: it runs local engine processes, exposes an
+OpenAI-compatible loopback API, and can use CUDA, DirectML, Metal/CoreML-adjacent
+providers, or CPU depending on the model backend. The browser/WebGPU runtime is
+still available with `mode="web"` for full backward compatibility. Created by
+Droidje AI.
 
-`217 models are available now! (LLM, emeddings, rerankers, VLM, OCR, TTS and more)`
+The native catalog starts with a stable MVP matrix across LLM, embeddings,
+rerankers, vision, OCR, ASR, TTS, translation, and other task classes. The web
+catalog still exposes the browser-ready `packages/catalog` model set.
 
-Includes browser-local RAG: persistent IndexedDB vector stores, embedding +
-optional reranker pipelines, automatic retrieval for LLM units, and
-`runtime.chatui()`.
+Includes local RAG: persistent vector stores, embedding + optional reranker
+pipelines, automatic retrieval for LLM units, and `runtime.chatui()`.
 
 ## Install
 
 ```powershell
 pip install xlocllm
 ```
+
+The base install stays light. In `native` mode, xlocllm downloads managed engine
+dependencies and model artifacts into the xlocllm cache on the first
+`runtime.run()`.
 
 Optional OpenAI client helper:
 
@@ -36,10 +46,18 @@ print(runtime.url)       # http://127.0.0.1:1146/v1
 print(runtime.status())  # bridge, runtime, models, metrics
 ```
 
-Without WebGPU, ask for the CPU/WASM-compatible catalog:
+Use the browser/WebGPU runtime explicitly when you need the old browser-backed
+behavior:
 
 ```python
-models = xlocllm.models(webgpu=False)
+xlocllm.mode = "web"
+# or: runtime = xlocllm.runtime([...], mode="web")
+```
+
+In browser mode without WebGPU, ask for the CPU/WASM-compatible catalog:
+
+```python
+models = xlocllm.models(mode="web", webgpu=False)
 ```
 
 ## OpenAI-Compatible Usage
@@ -61,7 +79,7 @@ with xlocllm.runtime([llm]) as runtime:
     print(response.choices[0].message.content)
 ```
 
-## Browser-Local RAG
+## Local RAG
 
 ```python
 import xlocllm
@@ -72,10 +90,13 @@ llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b-fp32", rag=rag)
 
 with xlocllm.runtime([llm]) as runtime:
     runtime.run()
-    rag.add(["xlocllm keeps vector stores in browser IndexedDB."], ids=["storage"])
+    rag.add(["xlocllm keeps vectors in the active runtime storage."], ids=["storage"])
     print(runtime.chat("Where does xlocllm keep vectors?"))
     runtime.chatui(session="kb-demo")
 ```
+
+Native mode uses local persistent storage. Browser mode uses IndexedDB in the
+paired browser runtime.
 
 ## Python SDK
 
@@ -86,24 +107,27 @@ Core objects:
 - `ModelInfo` - catalog entry with model metadata and hardware requirements.
 - `Unit` - model-backed, service, or composite capability.
 - `Runtime` - group of units running together.
-- `Bridge` - local HTTP/WebSocket process.
+- `Bridge` / `NativeBridge` - local HTTP control process for the selected mode.
 
 Useful helpers:
 
 ```python
 xlocllm.models(unit="LLM", max_vram_mb=1500)
-xlocllm.models(webgpu=False)
+xlocllm.models(mode="web", webgpu=False)
+xlocllm.models(mode="native")
 xlocllm.model("Qwen-3.5-0.8b", unit="LLM")
 xlocllm.bridges()
 xlocllm.runtimes()
 xlocllm.status()
 xlocllm.benchmark()
 xlocllm.benchmark("LLM")
+xlocllm.benchmark("LLM", mode="web")
 ```
 
-`benchmark()` temporarily opens a paired mini browser by default to detect real
-WebGPU/WebNN/NPU support, then closes it. With a unit type, it returns `fast`
-and `quality` model recommendations for the detected device.
+`benchmark()` checks local CPU/RAM/disk, native engine availability, GPU/NPU
+signals, and Hugging Face latency. In `mode="web"` it can temporarily open a
+paired mini browser to detect real WebGPU/WebNN/NPU support. With a unit type,
+it returns `fast` and `quality` model recommendations for the detected device.
 
 Reasoning-capable LLM families can be configured at unit creation or while the
 runtime is running:
@@ -119,8 +143,11 @@ CLI:
 xlocllm status
 xlocllm benchmark
 xlocllm benchmark LLM
-xlocllm models --unit LLM --no-webgpu
+xlocllm benchmark LLM --mode web
+xlocllm models --unit LLM
+xlocllm models --unit LLM --mode web --no-webgpu
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b"
+xlocllm run --unit LLM --model "Qwen-3.5-0.8b" --mode web
 ```
 
 ## Documentation

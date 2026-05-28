@@ -13,8 +13,10 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from ._paths import config_dir
+from ._mode import current_mode
 from .bridge import Bridge, bridges
 from .catalog import ModelInfo, models, normalize_unit
+from ._native_server import hardware_snapshot
 from .window import WindowHandle, find_chromium, window
 
 HF_URL = "https://huggingface.co"
@@ -23,13 +25,16 @@ HF_URL = "https://huggingface.co"
 def benchmark(  # noqa: A002
     type: str | None = None,
     *,
+    mode: str | None = None,
     ping_hf: bool = True,
     timeout: float = 2.0,
     browser: bool = True,
     browser_timeout: float = 15.0,
     port: int | None = None,
 ) -> dict[str, Any]:
+    resolved_mode = current_mode(mode)
     snapshot = system_snapshot(
+        mode=resolved_mode,
         ping_hf=ping_hf,
         timeout=timeout,
         browser=browser,
@@ -40,12 +45,13 @@ def benchmark(  # noqa: A002
         return snapshot
     unit_type = normalize_unit(type)
     snapshot["model_type"] = unit_type
-    snapshot["recommendations"] = recommend_models(unit_type, snapshot)
+    snapshot["recommendations"] = recommend_models(unit_type, snapshot, mode=resolved_mode)
     return snapshot
 
 
 def system_snapshot(
     *,
+    mode: str | None = None,
     ping_hf: bool = True,
     timeout: float = 2.0,
     browser: bool = True,
@@ -54,9 +60,15 @@ def system_snapshot(
 ) -> dict[str, Any]:
     memory = memory_snapshot()
     disk = disk_snapshot()
-    browser_info = browser_capabilities(start_browser=browser, timeout=browser_timeout, port=port)
+    resolved_mode = current_mode(mode)
+    browser_info = (
+        {"status": "skipped", "reason": "Native benchmark does not need a browser probe."}
+        if resolved_mode == "native"
+        else browser_capabilities(start_browser=browser, timeout=browser_timeout, port=port)
+    )
     return {
         "ok": True,
+        "mode": resolved_mode,
         "xlocllm": {"version": package_version()},
         "system": {
             "platform": platform.platform(),
@@ -70,16 +82,18 @@ def system_snapshot(
         "memory": memory,
         "disk": disk,
         "browser": browser_info,
+        "native": {"hardware": hardware_snapshot(), "engine_cache": str(config_dir() / "native" / "engines")},
         "network": {"huggingface": hf_ping(timeout=timeout) if ping_hf else {"checked": False}},
     }
 
 
-def recommend_models(unit_type: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+def recommend_models(unit_type: str, snapshot: dict[str, Any], *, mode: str | None = None) -> dict[str, Any]:
+    resolved_mode = current_mode(mode)
     raw_browser = snapshot.get("browser")
     browser: dict[str, Any] = raw_browser if isinstance(raw_browser, dict) else {}
     webgpu = browser.get("webgpu")
-    candidates = models(unit=unit_type, webgpu=False if webgpu is not True else None)
-    eligible, warnings = eligible_models(candidates, snapshot, webgpu is True)
+    candidates = models(unit=unit_type, mode=resolved_mode, webgpu=False if resolved_mode == "web" and webgpu is not True else None)
+    eligible, warnings = eligible_models(candidates, snapshot, resolved_mode == "web" and webgpu is True)
     visible = eligible or candidates
     if not visible:
         return {
@@ -119,7 +133,9 @@ def eligible_models(items: list[ModelInfo], snapshot: dict[str, Any], has_webgpu
         warnings.append("Free disk space is unknown; disk fit was not checked.")
     if accelerator_limit_mb is None:
         warnings.append("Memory limit is unknown; memory fit was not checked.")
-    if has_webgpu:
+    if snapshot.get("mode") == "native":
+        warnings.append("Native mode uses CPU by default and enables CUDA/DirectML/Metal when the engine exposes them.")
+    elif has_webgpu:
         warnings.append("WebGPU is available, but browser APIs do not expose exact GPU memory; fit is estimated.")
     else:
         warnings.append("WebGPU is not confirmed; recommendations use the CPU/WASM-compatible catalog subset.")

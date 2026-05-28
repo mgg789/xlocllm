@@ -12,7 +12,7 @@ def test_vectorstorage_payload() -> None:
         "type": "vectorstorage",
         "model": "docs",
         "options": {
-            "backend": "indexeddb",
+            "backend": "native",
             "metric": "dot",
             "persist": False,
             "namespace": "kb",

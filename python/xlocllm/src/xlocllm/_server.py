@@ -200,7 +200,7 @@ def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        return {"ok": True, "port": port, "browser_connected": bool(hub.websocket)}
+        return {"ok": True, "backend": "web", "port": port, "browser_connected": bool(hub.websocket)}
 
     @app.websocket("/xlocllm/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
@@ -221,7 +221,7 @@ def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI
 
     @app.get("/xlocllm/v1/units")
     async def xloc_units() -> dict[str, Any]:
-        return {"units": all_units()}
+        return {"units": all_units(mode="web")}
 
     @app.get("/xlocllm/v1/logs")
     async def logs(limit: int = 200) -> dict[str, Any]:
@@ -507,7 +507,7 @@ def visible_catalog_models(hub: BrowserHub) -> list[dict[str, Any]]:
     catalog_models = hub.status.get("catalogModels")
     if isinstance(catalog_models, list) and all(isinstance(item, dict) for item in catalog_models):
         return [dict(item) for item in catalog_models]
-    return all_models()
+    return all_models(mode="web")
 
 
 async def shutdown_after(app: FastAPI, port: int, delay: float) -> None:
@@ -523,7 +523,7 @@ def run_server(port: int, token: str, live_time: float | None = None) -> None:
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level=os.environ.get("XLOCLLM_LOG_LEVEL", "warning"))
     server = uvicorn.Server(config)
     app.state.uvicorn_server = server
-    upsert_bridge(port, pid=os.getpid(), token=token)
+    upsert_bridge(port, pid=os.getpid(), token=token, backend="web")
     server.run()
 
 

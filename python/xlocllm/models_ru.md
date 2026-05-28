@@ -3,6 +3,18 @@
 Источник: `packages/catalog/models.json`, schemaVersion `2`.
 Всего unit-групп: `24`. Всего моделей: `217`.
 
+Этот файл описывает browser/WebGPU каталог. В xlocllm v1.1 режим Python по
+умолчанию - `native`; он использует отдельный генерируемый native registry с
+GGUF LLM и ONNX Runtime task-моделями. Активный каталог лучше смотреть из Python:
+
+```python
+import xlocllm
+
+xlocllm.models(mode="native")  # каталог runtime по умолчанию в v1.1
+xlocllm.models(mode="web")     # browser/WebGPU каталог, описанный ниже
+xlocllm.model("Qwen-3.5-0.8b", unit="LLM", mode="native").to_dict()
+```
+
 Каждая запись содержит точный индекс обращения: используйте строку `xlocllm.unit("<unit>", "<modelId>")`.
 Внутри каждой группы модели отсортированы от более легких к более мощным по `hardwareTier`, числу параметров, VRAM и disk size.
 

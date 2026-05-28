@@ -9,13 +9,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._http import request_json
-from ._server import run_server
+from ._native_server import run_server
 from .catalog import all_models, all_units
-from .registry import active_bridge_ports, bridge_record, process_exists, remove_bridge, upsert_bridge
+from .registry import bridge_record, process_exists, remove_bridge, upsert_bridge
 
 
 @dataclass
-class Bridge:
+class NativeBridge:
     port: int = 1146
     ttl: float | None = None
     live_time: float | None = None
@@ -33,11 +33,11 @@ class Bridge:
     def url(self) -> str:
         return f"{self.base_url}/v1"
 
-    def activate(self, daemon: bool = False) -> "Bridge":
+    def activate(self, daemon: bool = False) -> "NativeBridge":
         if self._is_healthy():
-            upsert_bridge(self.port, token=self.token, backend="web")
+            upsert_bridge(self.port, token=self.token, backend="native")
             return self
-        record = upsert_bridge(self.port, token=self.token, backend="web")
+        record = upsert_bridge(self.port, token=self.token, backend="native")
         self.token = str(record["token"])
         if daemon:
             creationflags = 0
@@ -47,7 +47,7 @@ class Bridge:
                 [
                     sys.executable,
                     "-m",
-                    "xlocllm._server",
+                    "xlocllm._native_server",
                     "--port",
                     str(self.port),
                     "--token",
@@ -66,7 +66,7 @@ class Bridge:
                 daemon=True,
             )
             self._thread.start()
-        self.wait_ready(timeout=15)
+        self.wait_ready(timeout=30)
         return self
 
     def close(self) -> dict[str, Any]:
@@ -93,31 +93,32 @@ class Bridge:
         try:
             return list(self._get("/xlocllm/v1/models").get("models", []))
         except Exception:
-            return all_models(mode="web")
+            return all_models(mode="native")
 
     def units(self) -> list[dict[str, Any]]:
         try:
             return list(self._get("/xlocllm/v1/units").get("units", []))
         except Exception:
-            return all_units(mode="web")
+            return all_units(mode="native")
 
     def logs(self, limit: int = 200) -> list[dict[str, Any]]:
         return list(self._get(f"/xlocllm/v1/logs?limit={limit}").get("logs", []))
 
-    def wait_ready(self, timeout: float | None = None, require_browser: bool = False) -> "Bridge":
+    def wait_ready(self, timeout: float | None = None, require_browser: bool = False) -> "NativeBridge":
+        del require_browser
         deadline = time.time() + (timeout if timeout is not None else 60)
         last_error: Exception | None = None
         while time.time() < deadline:
             try:
                 health = self.health()
-                if health.get("ok") and (not require_browser or health.get("browser_connected")):
+                if health.get("ok") and health.get("backend") == "native":
                     return self
             except Exception as error:  # noqa: BLE001
                 last_error = error
             time.sleep(0.2)
         if last_error:
-            raise TimeoutError(f"xlocllm bridge did not become ready: {last_error}") from last_error
-        raise TimeoutError("xlocllm bridge did not become ready")
+            raise TimeoutError(f"xlocllm native bridge did not become ready: {last_error}") from last_error
+        raise TimeoutError("xlocllm native bridge did not become ready")
 
     def reload(self, units: list[dict[str, str]] | None = None) -> dict[str, Any]:
         return self._post("/xlocllm/v1/runtime/reload", {"units": units or []}, timeout=1800)
@@ -154,58 +155,9 @@ class Bridge:
     def _is_healthy(self) -> bool:
         try:
             health = self.health()
-            return bool(health.get("ok") and health.get("backend") in {None, "web"})
+            return bool(health.get("ok") and health.get("backend") == "native")
         except Exception:
             return False
-
-
-class BridgeGroup:
-    def __init__(self, bridges: list[Any]) -> None:
-        self.bridges = bridges
-
-    def __iter__(self) -> Any:
-        return iter(self.bridges)
-
-    def __len__(self) -> int:
-        return len(self.bridges)
-
-    def activate(self, daemon: bool = False) -> list[Any]:
-        return [bridge.activate(daemon=daemon) for bridge in self.bridges]
-
-    def close(self) -> list[dict[str, Any]]:
-        return [bridge.close() for bridge in self.bridges]
-
-    def status(self) -> list[dict[str, Any]]:
-        return [bridge.status() for bridge in self.bridges]
-
-    def health(self) -> list[dict[str, Any]]:
-        return [bridge.health() for bridge in self.bridges]
-
-
-def GetBridge(port: int | None = None) -> Bridge | BridgeGroup:
-    if port is not None:
-        return Bridge(port=port)
-    return BridgeGroup(bridges())
-
-
-def bridges(active_only: bool = True) -> list[Any]:
-    result: list[Any] = []
-    for candidate in active_bridge_ports():
-        record = bridge_record(candidate)
-        if not record:
-            continue
-        pid = _int_or_none(record.get("pid"))
-        if not active_only or process_exists(pid):
-            result.append(_bridge_from_record(candidate, record))
-    return result
-
-
-def _bridge_from_record(port: int, record: dict[str, Any]) -> Any:
-    if record.get("backend") == "native":
-        from .native_bridge import NativeBridge
-
-        return NativeBridge(port=port)
-    return Bridge(port=port)
 
 
 def _int_or_none(value: Any) -> int | None:

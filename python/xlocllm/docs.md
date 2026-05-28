@@ -1,8 +1,13 @@
 # xlocllm Python SDK
 
-`xlocllm` is a local browser-backed inference SDK. Python code talks to a
-loopback FastAPI bridge, while the actual model runtime lives in a paired
-browser window using WebGPU/WebNN through MLC WebLLM or Transformers.js.
+`xlocllm` is a local inference SDK with one Python-facing API and two runtime
+modes. The default is `native`: Python starts a local supervisor, exposes an
+OpenAI-compatible loopback API, and runs local engines such as llama.cpp/GGUF
+for LLMs and ONNX Runtime for embeddings, rerankers, vision, audio, OCR, and
+other task models.
+
+The existing browser/WebGPU runtime remains available with `mode="web"`. It
+keeps the old paired-browser behavior through MLC WebLLM and Transformers.js.
 
 ## Install
 
@@ -13,8 +18,13 @@ python -m pip install -e .\python\xlocllm
 Package metadata:
 
 - Python: `>=3.10`
-- Runtime dependencies: `fastapi`, `uvicorn[standard]`, `pydantic`
+- Base runtime dependencies: `fastapi`, `uvicorn[standard]`, `pydantic`
 - CLI entry points: `xlocllm`, `xlocllm-bridge`
+
+The base install is intentionally light. In `native` mode, managed engine
+dependencies and model artifacts are downloaded into the xlocllm cache during
+the first `runtime.run()` that needs them. Set `XLOCLLM_NATIVE_DISABLE_INSTALL=1`
+to make missing native dependencies fail fast instead of being installed.
 
 ## Core Objects
 
@@ -23,7 +33,16 @@ The v1-style SDK schema has four main concepts:
 - `ModelInfo` - immutable model catalog entry with hardware and runtime metadata.
 - `Unit` - one capability/model pair, for example `LLM + Qwen`.
 - `Runtime` - a group of units that should run together.
-- `Bridge` - local HTTP/WebSocket process used by Python and the browser runtime.
+- `Bridge` / `NativeBridge` - local HTTP control process for the selected mode.
+
+The global default mode is:
+
+```python
+import xlocllm
+
+print(xlocllm.mode)  # native
+xlocllm.mode = "web"  # opt into browser/WebGPU mode globally
+```
 
 ## Quick Start
 
@@ -86,27 +105,29 @@ Supported OpenAI-like endpoints:
 
 ## Top-Level API
 
-### `xlocllm.unit(type, model, reasoning=None, options=None, rag=None)`
+### `xlocllm.unit(type, model, reasoning=None, options=None, rag=None, mode=None)`
 
 Creates a `Unit` by resolving the requested unit type and model name against the
 catalog. `reasoning` may be `True`, `False`, or `None` for LLM families that
 advertise thinking/reasoning control. `options` is a dictionary passed to the
-browser runtime for that unit. For LLM units, pass `rag=<RAG unit>` to enable
+selected runtime for that unit. `mode` defaults to `xlocllm.mode`, which is
+`"native"` unless changed. For LLM units, pass `rag=<RAG unit>` to enable
 automatic retrieval before chat calls.
 
 ```python
 unit = xlocllm.unit("chat", "qwen-0.8b")
 print(unit.type)   # LLM
-print(unit.model)  # Qwen3.5-0.8B-q4f16_1-MLC
+print(unit.mode)   # native
 ```
 
 Accepted model names include exact `modelId`, `label`, and catalog aliases.
 
-### `xlocllm.vectorstorage(name="default", backend="indexeddb", metric="cosine", persist=True, namespace="default", options=None)`
+### `xlocllm.vectorstorage(name="default", backend="indexeddb", metric="cosine", persist=True, namespace="default", options=None, mode=None)`
 
-Creates a local service unit for vector storage. The first production backend is
-browser IndexedDB; use `persist=False` or `backend="memory"` for temporary
-stores. `metric` accepts `cosine`, `dot`, or `euclidean`.
+Creates a local service unit for vector storage. In native mode, the default
+backend is rewritten to the native persistent store. In web mode, the default
+backend remains browser IndexedDB. Use `persist=False` or `backend="memory"` for
+temporary stores. `metric` accepts `cosine`, `dot`, or `euclidean`.
 
 ```python
 store = xlocllm.vectorstorage(name="docs", namespace="kb")
@@ -115,11 +136,11 @@ store = xlocllm.vectorstorage(name="docs", namespace="kb")
 Direct vector storage calls require explicit embeddings. Most users should use
 `xlocllm.rag(...)`, which chunks text, embeds it, and writes vectors for you.
 
-### `xlocllm.rag(emb, rerank=None, store=None, name="default", chunk_size=800, chunk_overlap=120, top_k=5, candidate_k=30, score_threshold=None, options=None)`
+### `xlocllm.rag(emb, rerank=None, store=None, name="default", chunk_size=800, chunk_overlap=120, top_k=5, candidate_k=30, score_threshold=None, options=None, mode=None)`
 
 Creates a high-level RAG service unit. `emb` must be an embedding unit. `rerank`
 is optional and must be a reranker unit. If `store` is omitted, xlocllm creates
-an IndexedDB vector store named `<name>-store`.
+a vector store named `<name>-store` in the selected mode.
 
 ```python
 emb = xlocllm.unit("embedding", "multilingual-e5-small")
@@ -128,15 +149,18 @@ rag = xlocllm.rag(emb=emb, rerank=rerank, name="kb")
 llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b-fp32", rag=rag)
 ```
 
-### `xlocllm.runtime(units, port=1146, bridge=None, runtime_id=None)`
+### `xlocllm.runtime(units, port=1146, bridge=None, runtime_id=None, mode=None)`
 
-Creates a `Runtime` from `Unit` or `UnitRequest` objects.
+Creates a `Runtime` from `Unit` or `UnitRequest` objects. `mode=None` uses
+`xlocllm.mode`; pass `mode="web"` to force the browser/WebGPU backend for this
+runtime only.
 
 ```python
 runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b")], port=12000)
+web_runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b", mode="web")], mode="web")
 ```
 
-### `xlocllm.models(...)`
+### `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False)`
 
 Returns filtered catalog entries as `ModelInfo` objects.
 
@@ -160,19 +184,26 @@ Filters:
 - `max_size_gb`
 - `max_parameters_b`
 - `limit_per_unit`
+- `mode` - `"native"` or `"web"`; defaults to `xlocllm.mode`
+- `installed` - filter installed model artifacts when bridge/status data is available
+- `hardware` - optional hardware snapshot used for native availability filtering
+- `include_unavailable` - include native catalog entries even when local engine
+  or hardware policy says they are unavailable
 
 Example:
 
 ```python
 small_llms = xlocllm.models(unit="LLM", max_vram_mb=1500, search="qwen")
-cpu_models = xlocllm.models(webgpu=False)
+native_llms = xlocllm.models(unit="LLM", mode="native")
+cpu_web_models = xlocllm.models(unit="LLM", mode="web", webgpu=False)
 ```
 
-`webgpu=False` excludes MLC/WebLLM models and heavy Transformers.js models. The
-fallback catalog keeps at least one usable model for every unit class whenever
-the catalog contains a Transformers.js candidate for that class.
+In web mode, `webgpu=False` excludes MLC/WebLLM models and heavy
+Transformers.js models. The fallback catalog keeps at least one usable model for
+every unit class whenever the catalog contains a Transformers.js candidate for
+that class.
 
-### `xlocllm.model(name, unit=None)`
+### `xlocllm.model(name, unit=None, mode=None)`
 
 Returns one `ModelInfo`.
 
@@ -181,6 +212,10 @@ info = xlocllm.model("Qwen-3.5-0.8b", unit="LLM")
 print(info.model_id)
 print(info.to_dict())
 ```
+
+Native entries include backend fields such as `backend`, `format`, `repo`,
+`files`, `quantization`, `providers`, `ram_mb`, `vram_mb`, `disk_mb`, and
+`verified` when known.
 
 ### `xlocllm.bridges(active_only=True)`
 
@@ -200,12 +235,13 @@ Returns a dictionary with:
 - browser-reported resource metrics when available
 - catalog model count
 
-### `xlocllm.benchmark(type=None, ping_hf=True, timeout=2.0, browser=True, browser_timeout=15.0, port=None)`
+### `xlocllm.benchmark(type=None, mode=None, ping_hf=True, timeout=2.0, browser=True, browser_timeout=15.0, port=None)`
 
-Returns a dictionary with local system parameters, RAM, free disk space, browser
-capabilities, and Hugging Face latency. By default it starts a temporary local
-bridge and mini browser window to detect real WebGPU/WebNN/NPU availability,
-then closes them after the probe.
+Returns a dictionary with local system parameters, RAM, free disk space, native
+hardware/engine availability, optional browser capabilities, and Hugging Face
+latency. In native mode, no model-hosting browser is required. In web mode,
+`browser=True` starts a temporary local bridge and mini browser window to detect
+real WebGPU/WebNN/NPU availability, then closes them after the probe.
 
 When `type` is provided, benchmark also returns two recommendations for that
 unit type:
@@ -230,6 +266,7 @@ Properties:
 - `unit.model`
 - `unit.label`
 - `unit.model_info`
+- `unit.mode`
 - `unit.reasoning`
 - `unit.options`
 - `unit.rag` - attached RAG unit for LLM units, when configured
@@ -241,8 +278,8 @@ Methods:
 - `unit.to_dict()` - payload plus label and model metadata
 - `unit.status()` - attached runtime state if available
 - `unit.remove()` - remove from attached runtime without deleting cache
-- `unit.delete_cache(bridge=None)` - delete browser cache for the model
-- `unit.delete(delete_cache=True, bridge=None)` - remove from runtime and optionally delete browser cache
+- `unit.delete_cache(bridge=None)` - delete selected-mode cache for the model
+- `unit.delete(delete_cache=True, bridge=None)` - remove from runtime and optionally delete model cache
 - `unit.set_reasoning(enabled)` - hot-update reasoning control when attached to a running runtime
 - `unit.as_runtime(port=1146)` - create or reuse a single-unit runtime
 - `unit.install(port=1146)`
@@ -267,6 +304,7 @@ Properties:
 - `runtime.base_url` - `http://127.0.0.1:<port>`
 - `runtime.url` - `http://127.0.0.1:<port>/v1`
 - `runtime.bridge`
+- `runtime.mode`
 - `runtime.installed`
 - `runtime.running`
 - `runtime.unit_requests`
@@ -298,22 +336,25 @@ Methods:
 - `runtime.wait_ready(timeout=None, require_browser=False)`
 
 `Runtime` implements `with` cleanup. Exiting the context closes the owned bridge
-and browser window when they were started by that runtime.
+and any owned dashboard/browser window when they were started by that runtime.
 
 `runtime.remove_unit()` accepts the unit id, model id, or unit type. If the
-runtime is running and `delete_cache=False`, the SDK asks the browser runtime to
-deactivate that specific model. If `delete_cache=True`, it requests model cache
-cleanup through the bridge.
+runtime is running and `delete_cache=False`, the SDK asks the selected backend
+to deactivate that specific model. If `delete_cache=True`, it requests model
+cache cleanup through the bridge.
 
 ## RAG and Vector Storage
 
-RAG runs inside the paired browser runtime:
+RAG runs in the active runtime mode:
 
-1. `rag.add(...)` chunks documents in the browser.
+1. `rag.add(...)` chunks documents.
 2. The configured embedding unit embeds every chunk.
-3. Vectors and metadata are persisted in IndexedDB.
+3. Vectors and metadata are persisted in the selected backend store.
 4. `rag.search(...)` embeds the query, vector-searches candidates, optionally
    reranks them, and returns `results` plus an assembled `context` string.
+
+Native mode uses local persistent storage under the xlocllm cache. Web mode uses
+IndexedDB in the paired browser runtime.
 
 ```python
 emb = xlocllm.unit("embedding", "multilingual-e5-small")
@@ -440,18 +481,36 @@ client = runtime.client()  # requires the optional openai package
 - `XLOCLLM_HOME` - override state directory.
 - `XLOCLLM_WEB_URL` - use a custom web runtime URL instead of autodiscovery.
 - `XLOCLLM_LOG_LEVEL` - uvicorn log level, default `warning`.
+- `XLOCLLM_NATIVE_DISABLE_INSTALL=1` - disable managed native dependency
+  installation and fail with a diagnostic error when an engine is missing.
 
 Default state locations:
 
 - Windows: `%LOCALAPPDATA%\xlocllm`
 - Unix-like: `$XDG_STATE_HOME/xlocllm` or `~/.local/state/xlocllm`
 
+Native engines, downloaded model artifacts, and native vector storage live under
+the same `XLOCLLM_HOME` tree.
+
+## Native Runtime Notes
+
+Native mode is the default. The dashboard window is a monitor/control surface:
+it shows process, download, queue, loaded-unit, and resource status, but model
+weights are not executed in that browser window.
+
+Native LLMs use GGUF through llama.cpp-compatible loading. Non-LLM tasks use
+ONNX Runtime pipelines where available. The install planner checks the selected
+model, OS, Python version, hardware signals, engine cache, and model cache before
+starting. If a native engine or artifact cannot be installed or loaded, the
+error includes the backend, model id, OS, Python version, and cache/diagnostic
+context instead of silently falling back to web mode.
+
 ## Browser Runtime Notes
 
-The bridge binds to `127.0.0.1`. The browser window must stay open while browser
-models are running. The Python bridge is only a local control and API layer; the
-model weights and inference execution live in browser storage and browser GPU
-runtime.
+The bridge binds to `127.0.0.1`. In `mode="web"`, the browser window must stay
+open while browser models are running. The Python bridge is only a local control
+and API layer; the model weights and inference execution live in browser storage
+and browser GPU runtime.
 
 If a mini browser runtime disconnects while an RPC is in progress, the bridge
 waits up to 30 seconds for the browser to reconnect and retries the RPC. If the
@@ -481,10 +540,11 @@ llm.set_reasoning(False)
 ```
 
 Per-request values such as `reasoning`, `enable_thinking`, or
-`chat_template_kwargs={"enable_thinking": ...}` override the unit default. The
-browser runtime passes `chat_template_kwargs.enable_thinking` for
-Transformers.js pipelines and adds Qwen's `/think` or `/no_think` marker for
-MLC/WebLLM-style chat when needed.
+`chat_template_kwargs={"enable_thinking": ...}` override the unit default. Web
+mode passes `chat_template_kwargs.enable_thinking` for Transformers.js pipelines
+and adds Qwen's `/think` or `/no_think` marker for MLC/WebLLM-style chat when
+needed. Native mode keeps the same SDK flag and applies it through the native
+chat template path when the selected model advertises reasoning support.
 
 ## CLI
 
@@ -492,12 +552,16 @@ MLC/WebLLM-style chat when needed.
 xlocllm status
 xlocllm benchmark
 xlocllm benchmark LLM
+xlocllm benchmark LLM --mode web
 xlocllm benchmark embedding --no-browser --no-hf
-xlocllm models --unit LLM --no-webgpu
+xlocllm models --unit LLM
+xlocllm models --unit LLM --mode web --no-webgpu
 xlocllm model "Qwen-3.5-0.8b-fp32" --unit LLM
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b" --port 1146
+xlocllm run --unit LLM --model "Qwen-3.5-0.8b" --mode web
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b-fp32" --no-reasoning
 xlocllm bridge --port 1146
+xlocllm bridge --mode web --port 1146
 ```
 
 ## Ready Recipes
@@ -512,22 +576,23 @@ assistant, OCR/document intelligence, and other common tasks live in
 
 Imported directly from `xlocllm`:
 
-- `xlocllm.unit(type, model, reasoning=None, options=None, rag=None) -> Unit`
-- `xlocllm.vectorstorage(name="default", ...) -> Unit`
-- `xlocllm.rag(emb, rerank=None, store=None, ...) -> Unit`
-- `xlocllm.runtime(units, port=1146, bridge=None, runtime_id=None) -> Runtime`
-- `xlocllm.model(name, unit=None) -> ModelInfo`
-- `xlocllm.models(...) -> list[ModelInfo]`
+- `xlocllm.mode` - global runtime mode, `"native"` by default; set to `"web"` for browser mode
+- `xlocllm.unit(type, model, reasoning=None, options=None, rag=None, mode=None) -> Unit`
+- `xlocllm.vectorstorage(name="default", ..., mode=None) -> Unit`
+- `xlocllm.rag(emb, rerank=None, store=None, ..., mode=None) -> Unit`
+- `xlocllm.runtime(units, port=1146, bridge=None, runtime_id=None, mode=None) -> Runtime`
+- `xlocllm.model(name, unit=None, mode=None) -> ModelInfo`
+- `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False) -> list[ModelInfo]`
 - `xlocllm.cpu_fallback_model_ids() -> set[str]`
 - `xlocllm.supports_cpu_fallback(model_dict) -> bool`
 - `xlocllm.supports_reasoning(model_dict) -> bool`
-- `xlocllm.bridges(active_only=True) -> list[Bridge]`
+- `xlocllm.bridges(active_only=True) -> list[Bridge | NativeBridge]`
 - `xlocllm.runtimes(active_only=True) -> list[Runtime]`
 - `xlocllm.status() -> dict`
-- `xlocllm.benchmark(type=None, ...) -> dict`
+- `xlocllm.benchmark(type=None, mode=None, ...) -> dict`
 - `xlocllm.window(...) -> WindowHandle`
 - `xlocllm.GetBridge(port=None) -> Bridge | BridgeGroup`
-- classes: `Bridge`, `BridgeGroup`, `ModelInfo`, `Runtime`, `Unit`, `UnitRequest`
+- classes: `Bridge`, `NativeBridge`, `BridgeGroup`, `ModelInfo`, `Runtime`, `Unit`, `UnitRequest`
 - exceptions: `XlocLLMError`, `BridgeNotReady`, `BrowserNotConnected`,
   `ModelNotFound`, `RuntimeNotFound`, `UnitNotFound`
 
@@ -540,7 +605,8 @@ Properties:
 
 - `data: dict[str, Any]` - raw catalog object.
 - `unit: str` - unit type, for example `LLM` or `embedding`.
-- `runtime: str` - backend family, currently `mlc` or `transformers`.
+- `runtime: str` - backend family, for example `native`, `mlc`, or `transformers`.
+- `mode: str | None` - catalog mode when present.
 - `task: str` - backend task string.
 - `model_id: str` - exact model id to pass to `unit()`.
 - `label: str` - human-readable model name.
@@ -565,7 +631,7 @@ Methods:
 Constructor is normally not called directly. Prefer:
 
 ```python
-unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None, rag=None)
+unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None, rag=None, mode=None)
 ```
 
 Properties:
@@ -573,8 +639,9 @@ Properties:
 - `type: str` - normalized unit type.
 - `model: str` - resolved exact model id.
 - `model_info: ModelInfo | None` - catalog entry.
+- `mode: str | None` - selected runtime mode for this unit.
 - `reasoning: bool | None` - unit default for reasoning-capable LLMs.
-- `options: dict[str, Any]` - browser runtime options attached to the unit.
+- `options: dict[str, Any]` - runtime options attached to the unit.
 - `rag: Unit | None` - attached RAG service for LLM units.
 - `id: str` - local stable id in the form `<type>:<modelId>`.
 - `label: str` - catalog label, or model id if metadata is absent.
@@ -590,14 +657,14 @@ Methods:
   Returns attached runtime status when the unit belongs to a runtime; otherwise
   returns an offline selected-state dictionary.
 - `remove() -> dict[str, Any]`
-  Removes the unit from its attached runtime without deleting browser cache.
+  Removes the unit from its attached runtime without deleting model cache.
 - `delete(delete_cache=True, bridge=None) -> dict[str, Any]`
   If attached to a runtime, removes it from that runtime. If `delete_cache=True`,
-  asks the bridge to delete the browser cache for this model. For `RAG` and
+  asks the selected bridge to delete the model cache. For `RAG` and
   `vectorstorage`, `delete(ids=None, filter=None)` deletes documents or vector
   records instead.
 - `delete_cache(bridge=None) -> dict[str, Any]`
-  Deletes browser-side cache for this model through a bridge.
+  Deletes selected-mode cache for this model through a bridge.
 - `set_reasoning(enabled) -> dict[str, Any]`
   Updates local reasoning setting and pushes the change into the running runtime
   when attached.
@@ -624,7 +691,7 @@ Methods:
 - `clear(**params) -> dict[str, Any]`
   Clears the configured RAG/vector namespace.
 - `stats() -> dict[str, Any]`
-  Returns vector/RAG storage stats from the browser runtime.
+  Returns vector/RAG storage stats from the active runtime.
 - `reindex(**params) -> dict[str, Any]`
   Re-embeds existing RAG chunks with the current embedding model.
 
@@ -636,7 +703,7 @@ units and communicates through one bridge.
 Constructor:
 
 ```python
-Runtime(units, *, port=1146, bridge=None, runtime_id=None)
+Runtime(units, *, port=1146, bridge=None, runtime_id=None, mode=None)
 ```
 
 Use `xlocllm.runtime(...)` unless you need direct class construction.
@@ -644,9 +711,10 @@ Use `xlocllm.runtime(...)` unless you need direct class construction.
 Properties:
 
 - `id: str` - runtime registry id.
+- `mode: str` - selected runtime mode, `"native"` or `"web"`.
 - `port: int` - bridge port.
-- `bridge: Bridge | None` - attached bridge object.
-- `window_handle: WindowHandle | None` - browser window handle if opened by SDK.
+- `bridge: Bridge | NativeBridge | None` - attached bridge object.
+- `window_handle: WindowHandle | None` - dashboard/browser window handle if opened by SDK.
 - `installed: bool` - Python-side install state flag.
 - `running: bool` - Python-side run state flag.
 - `base_url: str` - bridge base URL, for example `http://127.0.0.1:1146`.
@@ -657,41 +725,42 @@ Methods:
 
 - `add_unit(unit, activate=True) -> Unit`
   Adds a `Unit` or `UnitRequest`. If runtime is already running and a bridge is
-  attached, `activate=True` asks the browser runtime to start that model.
+  attached, `activate=True` asks the selected backend to start that model.
 - `remove_unit(unit_id, delete_cache=False) -> dict[str, Any]`
   Removes a unit by `unit.id`, model id, or unit type. With `delete_cache=True`,
   asks the bridge to delete model cache.
 - `unit_status(unit_id) -> dict[str, Any]`
-  Returns the best available browser state for a unit.
+  Returns the best available backend state for a unit.
 - `configure_unit(unit_id, reasoning=None, options=None) -> dict[str, Any]`
-  Updates unit options. If runtime is running, sends the update to the paired
-  browser runtime without recreating the Python object.
+  Updates unit options. If runtime is running, sends the update to the active
+  backend without recreating the Python object.
 - `set_reasoning(unit_id, enabled) -> dict[str, Any]`
   Convenience wrapper for `configure_unit(..., reasoning=enabled)`.
 - `units(as_dict=False, state=False) -> list[Any]`
-  Returns configured `Unit` objects, dictionaries, or browser-reported unit
+  Returns configured `Unit` objects, dictionaries, or backend-reported unit
   states when `state=True`.
 - `models() -> list[dict[str, Any]]`
-  Returns browser runtime model states if available; otherwise returns configured
+  Returns backend model states if available; otherwise returns configured
   unit dictionaries.
 - `install(port=None) -> dict[str, Any]`
-  Starts bridge daemon, opens browser window, waits for pairing, and requests
-  model installation.
+  Starts the selected bridge daemon and requests engine/model installation. Web
+  mode opens the paired browser and waits for pairing; native mode starts the
+  local supervisor and opens the dashboard.
 - `run(port=None) -> dict[str, Any]`
   Ensures install has happened and starts all configured units.
 - `stop() -> dict[str, Any]`
-  Stops running browser models and closes the owned browser window.
+  Stops running models and closes the owned dashboard/browser window.
 - `hibernate() -> dict[str, Any]`
   Unloads active models but keeps them selected.
 - `heatup() -> dict[str, Any]`
   Starts active models and performs a small warmup for supported units.
 - `status() -> dict[str, Any]`
-  Returns runtime id, URL, configured units, bridge process info, and browser
+  Returns runtime id, URL, mode, configured units, bridge process info, and backend
   status snapshot when reachable.
 - `health() -> dict[str, Any]`
   Returns bridge health.
 - `logs(limit=200) -> list[dict[str, Any]]`
-  Returns bridge/browser runtime logs.
+  Returns bridge/backend runtime logs.
 - `invoke(endpoint, payload, timeout=None) -> dict[str, Any]`
   Calls `/xlocllm/v1/invoke/{endpoint}`.
 - `client(api_key="xlocllm", **kwargs) -> Any`
@@ -703,19 +772,21 @@ Methods:
 - `embed(input, model=None) -> list[Any]`
   Convenience wrapper for `embeddings`.
 - `open() -> WindowHandle`
-  Opens or reopens the browser UI for the attached bridge.
+  Opens or reopens the native dashboard or browser UI for the attached bridge.
 - `chatui(model=None, session="default", use_rag=True, open_browser=True, width=760, height=860) -> WindowHandle`
-  Opens a browser chat window backed by the running runtime.
+  Opens a chat window backed by the running runtime.
 - `close() -> dict[str, Any]`
   Shuts down the bridge and removes runtime registry state.
 - `wait_ready(timeout=None, require_browser=False) -> Runtime`
-  Waits until the bridge is reachable, and optionally until the browser is paired.
+  Waits until the bridge is reachable, and optionally until the web browser is paired.
 - `__enter__() -> Runtime`, `__exit__(...) -> False`
   Context-manager support for cleanup.
 
-### `Bridge`
+### `Bridge` / `NativeBridge`
 
-`Bridge` is the local HTTP/WebSocket control plane.
+`Bridge` is the local HTTP/WebSocket control plane for web mode. `NativeBridge`
+is the local control plane for native mode and exposes the same main SDK-facing
+methods.
 
 Constructor:
 
@@ -748,22 +819,22 @@ Methods:
 - `units() -> list[dict[str, Any]]`
   Returns unit definitions from bridge or local fallback.
 - `logs(limit=200) -> list[dict[str, Any]]`
-  Returns bridge/browser logs.
+  Returns bridge/backend logs.
 - `wait_ready(timeout=None, require_browser=False) -> Bridge`
   Waits for bridge health and optionally browser pairing.
 - `reload(units=None) -> dict[str, Any]`
-  Stops and reruns the browser runtime with supplied units.
+  Stops and reruns the backend runtime with supplied units.
 - `set_active(unit, active=True, model=None) -> dict[str, Any]`
   Starts a model for `active=True`; deactivates a model through `runtime/set_active`
   for `active=False`.
 - `delete_model(unit_or_model, model=None) -> dict[str, Any]`
-  Requests browser-side model cache deletion.
+  Requests model cache deletion.
 - `delete_all_models(confirm=True) -> dict[str, Any]`
-  Deletes all known browser-side model cache entries. Raises if `confirm=False`.
+  Deletes all known model cache entries. Raises if `confirm=False`.
 - `invoke(endpoint, payload, timeout=None) -> dict[str, Any]`
   Calls `/xlocllm/v1/invoke/{endpoint}`.
 - `processes() -> dict[str, Any]`
-  Returns bridge and browser window PIDs with alive flags.
+  Returns bridge and window/dashboard PIDs with alive flags.
 
 ### `BridgeGroup`
 

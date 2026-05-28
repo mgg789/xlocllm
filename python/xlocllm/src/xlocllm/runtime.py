@@ -8,6 +8,8 @@ from urllib.parse import urlencode
 
 from .bridge import Bridge, bridges
 from .catalog import ModelInfo, all_models, model as catalog_model, resolve_model
+from ._mode import RuntimeMode, current_mode
+from .native_bridge import NativeBridge
 from .registry import all_runtime_records, bridge_record, process_exists, remove_runtime, upsert_runtime
 from .types import UnitRequest
 from .window import WindowHandle, discover_web_url, window
@@ -15,6 +17,7 @@ from .window import WindowHandle, discover_web_url, window
 
 SERVICE_UNIT_TYPES = {"vectorstorage", "RAG"}
 _RAG_UNSET: Any = object()
+BridgeLike = Bridge | NativeBridge
 
 
 @dataclass
@@ -22,6 +25,7 @@ class Unit:
     type: str
     model: str
     model_info: ModelInfo | None = None
+    mode: RuntimeMode | None = None
     reasoning: bool | None = None
     options: dict[str, Any] = field(default_factory=dict)
     rag: Unit | None = field(default=None, repr=False, compare=False)
@@ -59,6 +63,7 @@ class Unit:
                 "id": self.id,
                 "label": self.label,
                 "supports_reasoning": self.supports_reasoning,
+                "mode": self.mode,
             }
         )
         if self.model_info is not None:
@@ -77,10 +82,14 @@ class Unit:
             return {"ok": True, "removed": False, "unit": self.to_dict()}
         return self._runtime.remove_unit(self.id, delete_cache=False)
 
-    def delete_cache(self, *, bridge: Bridge | None = None) -> dict[str, Any]:
+    def delete_cache(self, *, bridge: BridgeLike | None = None) -> dict[str, Any]:
         if _is_service_unit_type(self.type):
             raise ValueError(f"{self.type} units do not have model cache")
-        active_bridge = bridge or (self._runtime.bridge if self._runtime is not None else None) or Bridge()
+        active_bridge = (
+            bridge
+            or (self._runtime.bridge if self._runtime is not None else None)
+            or _default_bridge_for_mode(self.mode)
+        )
         return active_bridge.delete_model(self.type, self.model)
 
     def set_reasoning(self, enabled: bool | None) -> dict[str, Any]:
@@ -156,7 +165,7 @@ class Unit:
         *,
         filter: Mapping[str, Any] | None = None,  # noqa: A002
         delete_cache: bool = True,
-        bridge: Bridge | None = None,
+        bridge: BridgeLike | None = None,
         **params: Any,
     ) -> dict[str, Any]:
         if self.type == "RAG":
@@ -167,12 +176,12 @@ class Unit:
             return self._runtime.remove_unit(self.id, delete_cache=delete_cache)
         if not delete_cache:
             return {"ok": True, "deleted": False, "unit": self.to_dict()}
-        return (bridge or Bridge()).delete_model(self.type, self.model)
+        return (bridge or _default_bridge_for_mode(self.mode)).delete_model(self.type, self.model)
 
     def as_runtime(self, port: int | str = 1146) -> Runtime:
         resolved_port = int(port)
-        if self._single_runtime is None or self._single_runtime.port != resolved_port:
-            self._single_runtime = Runtime([self], port=resolved_port)
+        if self._single_runtime is None or self._single_runtime.port != resolved_port or self._single_runtime.mode != current_mode(self.mode):
+            self._single_runtime = Runtime([self], port=resolved_port, mode=self.mode)
         return self._single_runtime
 
     def install(self, port: int | str = 1146) -> dict[str, Any]:
@@ -211,11 +220,13 @@ class Runtime:
         units: Iterable[Unit | UnitRequest],
         *,
         port: int | str = 1146,
-        bridge: Bridge | None = None,
+        bridge: BridgeLike | None = None,
         runtime_id: str | None = None,
+        mode: str | None = None,
     ) -> None:
         self.id = runtime_id or f"rt_{uuid.uuid4().hex}"
         self.port = int(port)
+        self.mode = current_mode(mode)
         self.bridge = bridge
         self.window_handle: WindowHandle | None = None
         self.chat_window_handle: WindowHandle | None = None
@@ -331,7 +342,7 @@ class Runtime:
             unit.rag = rag_update
             self._attach_unit(rag_update)
         elif isinstance(rag_update, dict):
-            restored_rag = _unit_from_payload(rag_update)
+            restored_rag = _unit_from_payload(rag_update, mode=self.mode)
             if restored_rag is not None:
                 unit.rag = restored_rag
                 self._attach_unit(restored_rag)
@@ -367,7 +378,8 @@ class Runtime:
     def install(self, port: int | str | None = None) -> dict[str, Any]:
         bridge = self._ensure_bridge(int(port) if port is not None else self.port, daemon=True)
         self._ensure_runtime_window(bridge)
-        self._wait_for_browser(bridge)
+        if self.mode == "web":
+            self._wait_for_browser(bridge)
         result = bridge._post(
             "/xlocllm/v1/runtime/install",
             {"units": [unit.to_payload() for unit in self._units]},
@@ -380,7 +392,8 @@ class Runtime:
     def run(self, port: int | str | None = None) -> dict[str, Any]:
         bridge = self._ensure_bridge(int(port) if port is not None else self.port, daemon=True)
         self._ensure_runtime_window(bridge)
-        self._wait_for_browser(bridge)
+        if self.mode == "web":
+            self._wait_for_browser(bridge)
         result = bridge._post(
             "/xlocllm/v1/runtime/run",
             {"units": [unit.to_payload() for unit in self._units]},
@@ -429,6 +442,7 @@ class Runtime:
         return {
             "ok": True,
             "id": self.id,
+            "mode": self.mode,
             "port": bridge.port,
             "url": bridge.url,
             "bridge": {
@@ -481,7 +495,8 @@ class Runtime:
 
     def open(self) -> WindowHandle:
         bridge = self._require_bridge()
-        self.window_handle = window(port=bridge.port, token=bridge.token, close_on_exit=False, mode="mini")
+        web_url = f"http://127.0.0.1:{bridge.port}/native-dashboard" if self.mode == "native" else None
+        self.window_handle = window(port=bridge.port, token=bridge.token, close_on_exit=False, mode="mini", web_url=web_url)
         return self.window_handle
 
     def chatui(
@@ -509,7 +524,7 @@ class Runtime:
         }
         if model:
             query["model"] = model
-        base_url = discover_web_url(bridge.port)
+        base_url = f"http://127.0.0.1:{bridge.port}/native-chat" if self.mode == "native" else discover_web_url(bridge.port)
         separator = "&" if "?" in base_url else "?"
         url = f"{base_url}{separator}{urlencode(query)}"
         if not open_browser:
@@ -549,27 +564,29 @@ class Runtime:
         self._require_bridge().wait_ready(timeout=timeout, require_browser=require_browser)
         return self
 
-    def _ensure_bridge(self, port: int, daemon: bool) -> Bridge:
+    def _ensure_bridge(self, port: int, daemon: bool) -> BridgeLike:
         self.port = port
-        if self.bridge is None or self.bridge.port != port:
-            self.bridge = Bridge(port=port)
+        bridge_cls: type[BridgeLike] = NativeBridge if self.mode == "native" else Bridge
+        if self.bridge is None or self.bridge.port != port or not isinstance(self.bridge, bridge_cls):
+            self.bridge = bridge_cls(port=port)
         self.bridge.activate(daemon=daemon)
         self._save_runtime_state("configured")
         return self.bridge
 
-    def _require_bridge(self) -> Bridge:
+    def _require_bridge(self) -> BridgeLike:
         if self.bridge is None:
-            self.bridge = Bridge(port=self.port)
+            self.bridge = NativeBridge(port=self.port) if self.mode == "native" else Bridge(port=self.port)
         return self.bridge
 
-    def _bridge_or_default(self) -> Bridge:
-        return self.bridge or Bridge(port=self.port)
+    def _bridge_or_default(self) -> BridgeLike:
+        return self.bridge or (NativeBridge(port=self.port) if self.mode == "native" else Bridge(port=self.port))
 
-    def _ensure_runtime_window(self, bridge: Bridge) -> WindowHandle:
+    def _ensure_runtime_window(self, bridge: BridgeLike) -> WindowHandle:
         if (
             self.window_handle is None
             or (self.window_handle.owned and self.window_handle.pid is not None and not process_exists(self.window_handle.pid))
         ):
+            web_url = f"http://127.0.0.1:{bridge.port}/native-dashboard" if self.mode == "native" else None
             self.window_handle = window(
                 port=bridge.port,
                 token=bridge.token,
@@ -577,10 +594,11 @@ class Runtime:
                 mode="mini",
                 width=420,
                 height=340,
+                web_url=web_url,
             )
         return self.window_handle
 
-    def _wait_for_browser(self, bridge: Bridge) -> None:
+    def _wait_for_browser(self, bridge: BridgeLike) -> None:
         try:
             bridge.wait_ready(timeout=30, require_browser=True)
         except TimeoutError as error:
@@ -599,20 +617,29 @@ class Runtime:
 
     def _coerce_unit(self, item: Unit | UnitRequest) -> Unit:
         if isinstance(item, Unit):
+            if item.mode is None:
+                item.mode = self.mode
+            elif item.mode != self.mode and not _is_service_unit_type(item.type):
+                raise ValueError(
+                    f"Unit {item.id!r} was resolved for mode={item.mode!r}, "
+                    f"but this runtime uses mode={self.mode!r}. Recreate the unit with mode={self.mode!r}."
+                )
             return item
         if isinstance(item, UnitRequest):
             if _is_service_unit_type(item.type):
                 return Unit(
                     type=_normalize_service_unit_type(item.type),
                     model=item.model,
+                    mode=self.mode,
                     reasoning=item.reasoning,
                     options=dict(item.options or {}),
                 )
-            resolved = resolve_model(item.type, item.model)
+            resolved = resolve_model(item.type, item.model, mode=self.mode)
             return Unit(
                 type=str(resolved["unit"]),
                 model=str(resolved["modelId"]),
                 model_info=ModelInfo(resolved),
+                mode=self.mode,
                 reasoning=item.reasoning,
                 options=dict(item.options or {}),
             )
@@ -639,6 +666,7 @@ class Runtime:
         return {
             "ok": False,
             "id": self.id,
+            "mode": self.mode,
             "port": self.port,
             "url": self.url,
             "running": self.running,
@@ -646,6 +674,7 @@ class Runtime:
             "units": self.units(as_dict=True),
             "runtime": {
                 "connected": False,
+                "backend": self.mode,
                 "running": self.running,
                 "installing": False,
                 "models": [unit.to_dict() for unit in self._units],
@@ -668,6 +697,7 @@ class Runtime:
             self.id,
             port=self.bridge.port,
             url=self.url,
+            mode=self.mode,
             state=state,
             running=self.running,
             installed=self.installed,
@@ -679,23 +709,27 @@ def unit(
     type: str,  # noqa: A002
     model: str,
     *,
+    mode: str | None = None,
     reasoning: bool | None = None,
     options: dict[str, Any] | None = None,
     rag: Unit | UnitRequest | None = None,
 ) -> Unit:
+    resolved_mode = current_mode(mode)
     if _is_service_unit_type(type):
         return Unit(
             type=_normalize_service_unit_type(type),
             model=model,
+            mode=resolved_mode,
             reasoning=reasoning,
             options=dict(options or {}),
         )
-    resolved = resolve_model(type, model)
-    rag_unit = _coerce_nested_unit(rag) if rag is not None else None
+    resolved = resolve_model(type, model, mode=resolved_mode)
+    rag_unit = _coerce_nested_unit(rag, mode=resolved_mode) if rag is not None else None
     unit_item = Unit(
         type=str(resolved["unit"]),
         model=str(resolved["modelId"]),
         model_info=ModelInfo(resolved),
+        mode=resolved_mode,
         reasoning=reasoning,
         options=dict(options or {}),
         rag=rag_unit,
@@ -708,6 +742,7 @@ def unit(
 def vectorstorage(
     name: str = "default",
     *,
+    mode: str | None = None,
     backend: str = "indexeddb",
     metric: str = "cosine",
     persist: bool = True,
@@ -722,7 +757,10 @@ def vectorstorage(
     }
     if options:
         storage_options.update(options)
-    return Unit(type="vectorstorage", model=name, options=storage_options)
+    resolved_mode = current_mode(mode)
+    if resolved_mode == "native" and backend == "indexeddb":
+        storage_options["backend"] = "native"
+    return Unit(type="vectorstorage", model=name, mode=resolved_mode, options=storage_options)
 
 
 def rag(
@@ -731,6 +769,7 @@ def rag(
     rerank: Unit | UnitRequest | None = None,
     store: Unit | UnitRequest | None = None,
     name: str = "default",
+    mode: str | None = None,
     chunk_size: int = 800,
     chunk_overlap: int = 120,
     top_k: int = 5,
@@ -738,9 +777,10 @@ def rag(
     score_threshold: float | None = None,
     options: dict[str, Any] | None = None,
 ) -> Unit:
-    emb_unit = _coerce_nested_unit(emb)
-    rerank_unit = _coerce_nested_unit(rerank) if rerank is not None else None
-    store_unit = _coerce_nested_unit(store) if store is not None else vectorstorage(name=f"{name}-store")
+    resolved_mode = current_mode(mode)
+    emb_unit = _coerce_nested_unit(emb, mode=resolved_mode)
+    rerank_unit = _coerce_nested_unit(rerank, mode=resolved_mode) if rerank is not None else None
+    store_unit = _coerce_nested_unit(store, mode=resolved_mode) if store is not None else vectorstorage(name=f"{name}-store", mode=resolved_mode)
     if emb_unit.type != "embedding":
         raise ValueError("rag(emb=...) requires an embedding unit")
     if rerank_unit is not None and rerank_unit.type != "reranker":
@@ -759,17 +799,18 @@ def rag(
     }
     if options:
         rag_options.update(options)
-    return Unit(type="RAG", model=name, options=rag_options)
+    return Unit(type="RAG", model=name, mode=resolved_mode, options=rag_options)
 
 
 def runtime(
     units: Iterable[Unit | UnitRequest],
     *,
     port: int | str = 1146,
-    bridge: Bridge | None = None,
+    bridge: BridgeLike | None = None,
     runtime_id: str | None = None,
+    mode: str | None = None,
 ) -> Runtime:
-    return Runtime(units, port=port, bridge=bridge, runtime_id=runtime_id)
+    return Runtime(units, port=port, bridge=bridge, runtime_id=runtime_id, mode=mode)
 
 
 def runtimes(active_only: bool = True) -> list[Runtime]:
@@ -779,7 +820,8 @@ def runtimes(active_only: bool = True) -> list[Runtime]:
         if not runtime_id:
             continue
         port = _int_or_default(record.get("port"), 1146)
-        bridge = Bridge(port=port)
+        record_mode = current_mode(str(record.get("mode") or current_mode()))
+        bridge: BridgeLike = NativeBridge(port=port) if record_mode == "native" else Bridge(port=port)
         if active_only:
             bridge_registry_record = bridge_record(port)
             pid = _int_or_none(bridge_registry_record.get("pid") if bridge_registry_record else None)
@@ -788,12 +830,12 @@ def runtimes(active_only: bool = True) -> list[Runtime]:
         unit_items = []
         for item in record.get("units", []):
             if isinstance(item, dict) and isinstance(item.get("type"), str) and isinstance(item.get("model"), str):
-                restored = _unit_from_payload(item)
+                restored = _unit_from_payload(item, mode=record_mode)
                 if restored is not None:
                     unit_items.append(restored)
         if not unit_items:
             continue
-        result.append(Runtime(unit_items, port=port, bridge=bridge, runtime_id=runtime_id))
+        result.append(Runtime(unit_items, port=port, bridge=bridge, runtime_id=runtime_id, mode=record_mode))
     return result
 
 
@@ -842,8 +884,8 @@ def status() -> dict[str, Any]:
     }
 
 
-def model(name: str, unit: str | None = None) -> ModelInfo:
-    return catalog_model(name, unit=unit)
+def model(name: str, unit: str | None = None, *, mode: str | None = None) -> ModelInfo:
+    return catalog_model(name, unit=unit, mode=mode)
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -871,24 +913,38 @@ def _normalize_service_unit_type(unit_type: str) -> str:
     return unit_type
 
 
-def _coerce_nested_unit(item: Unit | UnitRequest | None) -> Unit:
+def _default_bridge_for_mode(mode: str | None = None) -> BridgeLike:
+    return NativeBridge() if current_mode(mode) == "native" else Bridge()
+
+
+def _coerce_nested_unit(item: Unit | UnitRequest | None, *, mode: str | None = None) -> Unit:
+    resolved_mode = current_mode(mode)
     if item is None:
         raise TypeError("nested unit cannot be None")
     if isinstance(item, Unit):
+        if item.mode is None:
+            item.mode = resolved_mode
+        elif item.mode != resolved_mode and not _is_service_unit_type(item.type):
+            raise ValueError(
+                f"Nested unit {item.id!r} was resolved for mode={item.mode!r}, "
+                f"but parent uses mode={resolved_mode!r}"
+            )
         return item
     if isinstance(item, UnitRequest):
         if _is_service_unit_type(item.type):
             return Unit(
                 type=_normalize_service_unit_type(item.type),
                 model=item.model,
+                mode=resolved_mode,
                 reasoning=item.reasoning,
                 options=dict(item.options or {}),
             )
-        resolved = resolve_model(item.type, item.model)
+        resolved = resolve_model(item.type, item.model, mode=resolved_mode)
         return Unit(
             type=str(resolved["unit"]),
             model=str(resolved["modelId"]),
             model_info=ModelInfo(resolved),
+            mode=resolved_mode,
             reasoning=item.reasoning,
             options=dict(item.options or {}),
         )
@@ -902,14 +958,15 @@ def _nested_units(unit: Unit) -> list[Unit]:
         result.extend(_nested_units(unit.rag))
     if unit.type == "RAG":
         for key in ("emb", "store", "rerank"):
-            child = _unit_from_payload(unit.options.get(key))
+            child = _unit_from_payload(unit.options.get(key), mode=unit.mode)
             if child is not None:
                 result.append(child)
                 result.extend(_nested_units(child))
     return result
 
 
-def _unit_from_payload(value: Any) -> Unit | None:
+def _unit_from_payload(value: Any, *, mode: str | None = None) -> Unit | None:
+    resolved_mode = current_mode(mode)
     if isinstance(value, Unit):
         return value
     if not isinstance(value, dict):
@@ -924,18 +981,20 @@ def _unit_from_payload(value: Any) -> Unit | None:
         return Unit(
             type=_normalize_service_unit_type(unit_type),
             model=model,
+            mode=resolved_mode,
             reasoning=value.get("reasoning") if isinstance(value.get("reasoning"), bool) else None,
             options=options if isinstance(options, dict) else {},
-            rag=_unit_from_payload(rag_payload),
+            rag=_unit_from_payload(rag_payload, mode=resolved_mode),
         )
-    resolved = resolve_model(unit_type, model)
+    resolved = resolve_model(unit_type, model, mode=resolved_mode)
     return Unit(
         type=str(resolved["unit"]),
         model=str(resolved["modelId"]),
         model_info=ModelInfo(resolved),
+        mode=resolved_mode,
         reasoning=value.get("reasoning") if isinstance(value.get("reasoning"), bool) else None,
         options=options if isinstance(options, dict) else {},
-        rag=_unit_from_payload(rag_payload),
+        rag=_unit_from_payload(rag_payload, mode=resolved_mode),
     )
 
 

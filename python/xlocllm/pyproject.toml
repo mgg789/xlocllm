@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xlocllm"
-version = "1.0.1"
-description = "Local browser-backed LLM and multimodal inference bridge"
+version = "1.1.0"
+description = "Local native and browser-backed AI inference bridge"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
   { name = "xlocllm contributors" }
 ]
-keywords = ["llm", "webgpu", "openai", "transformers", "mlc", "local-ai"]
+keywords = ["llm", "local-ai", "openai", "gguf", "onnxruntime", "webgpu"]
 dependencies = [
   "fastapi>=0.124.0",
   "uvicorn[standard]>=0.38.0",

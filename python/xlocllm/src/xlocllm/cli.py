@@ -7,9 +7,11 @@ from collections.abc import Sequence
 from typing import Any
 
 from .benchmark import benchmark as run_benchmark
+from ._mode import current_mode
 from .bridge import Bridge
 from .catalog import model as catalog_model
 from .catalog import models as catalog_models
+from .native_bridge import NativeBridge
 from .runtime import runtime as create_runtime
 from .runtime import status as runtime_status
 from .runtime import unit as create_unit
@@ -26,6 +28,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _print_json(
                 run_benchmark(
                     args.type,
+                    mode=args.mode,
                     ping_hf=args.hf,
                     timeout=args.timeout,
                     browser=args.browser,
@@ -36,6 +39,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if command == "models":
             items = catalog_models(
                 unit=args.unit,
+                mode=args.mode,
                 runtime=args.runtime,
                 task=args.task,
                 task_group=args.task_group,
@@ -55,14 +59,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return _print_json([item.to_dict() for item in items])
         if command == "model":
-            return _print_json(catalog_model(args.name, unit=args.unit).to_dict())
+            return _print_json(catalog_model(args.name, unit=args.unit, mode=args.mode).to_dict())
         if command == "run":
-            rt = create_runtime([create_unit(args.unit, args.model, reasoning=args.reasoning)], port=args.port)
+            rt = create_runtime(
+                [create_unit(args.unit, args.model, mode=args.mode, reasoning=args.reasoning)],
+                port=args.port,
+                mode=args.mode,
+            )
             result = rt.run()
             return _print_json({"runtime": rt.status(), "run": result})
         if command == "bridge":
-            bridge = Bridge(port=args.port).activate(daemon=True)
-            return _print_json({"ok": True, "port": bridge.port, "url": bridge.url})
+            selected_mode = current_mode(args.mode)
+            bridge = (
+                NativeBridge(port=args.port) if selected_mode == "native" else Bridge(port=args.port)
+            ).activate(daemon=True)
+            return _print_json(
+                {"ok": True, "mode": selected_mode, "port": bridge.port, "url": bridge.url}
+            )
     except Exception as error:  # noqa: BLE001
         print(f"xlocllm: {error}", file=sys.stderr)
         return 1
@@ -78,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     benchmark_parser = subparsers.add_parser("benchmark", help="Inspect local capabilities and recommend models")
     benchmark_parser.add_argument("type", nargs="?", help="Optional unit type, for example LLM or embedding")
+    benchmark_parser.add_argument("--mode", choices=["native", "web"], default=None, help="Runtime mode")
     benchmark_parser.add_argument("--hf", action=argparse.BooleanOptionalAction, default=True, help="Ping Hugging Face")
     benchmark_parser.add_argument("--timeout", type=float, default=2.0, help="Network timeout in seconds")
     benchmark_parser.add_argument(
@@ -95,14 +109,17 @@ def build_parser() -> argparse.ArgumentParser:
     model_parser = subparsers.add_parser("model", help="Show one catalog model")
     model_parser.add_argument("name", help="Model id, label, or alias")
     model_parser.add_argument("--unit", help="Unit type, for example LLM or embedding")
+    model_parser.add_argument("--mode", choices=["native", "web"], default=None, help="Catalog mode")
 
     run_parser = subparsers.add_parser("run", help="Start one unit and expose the OpenAI-compatible API")
     run_parser.add_argument("--unit", required=True, help="Unit type, for example LLM or embedding")
     run_parser.add_argument("--model", required=True, help="Model id, label, or alias")
     run_parser.add_argument("--reasoning", action=argparse.BooleanOptionalAction, default=None, help="Enable or disable reasoning when supported")
+    run_parser.add_argument("--mode", choices=["native", "web"], default=None, help="Runtime mode")
     run_parser.add_argument("--port", type=int, default=1146, help="Bridge port")
 
     bridge_parser = subparsers.add_parser("bridge", help="Start the bridge daemon")
+    bridge_parser.add_argument("--mode", choices=["native", "web"], default=None, help="Bridge mode")
     bridge_parser.add_argument("--port", type=int, default=1146, help="Bridge port")
 
     return parser
@@ -110,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_model_filters(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--unit", help="Filter by unit type")
+    parser.add_argument("--mode", choices=["native", "web"], default=None, help="Catalog mode")
     parser.add_argument("--runtime", help="Filter by runtime backend")
     parser.add_argument("--task", help="Filter by Transformers.js task")
     parser.add_argument("--task-group", help="Filter by high-level task group")
