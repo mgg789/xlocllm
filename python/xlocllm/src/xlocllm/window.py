@@ -88,6 +88,50 @@ def window(
     return WindowHandle(port=port, url=url, pid=None, owned=False)
 
 
+def native_dashboard_window(
+    port: int = 1146,
+    *,
+    token: str | None = None,
+    close_on_exit: bool = True,
+    width: int = 440,
+    height: int = 430,
+) -> WindowHandle:
+    url = f"native://xlocllm/{port}"
+    command = [
+        sys.executable,
+        "-m",
+        "xlocllm._native_window",
+        "--port",
+        str(port),
+        "--width",
+        str(width),
+        "--height",
+        str(height),
+    ]
+    if token:
+        command.append(f"--token={token}")
+    env = dict(os.environ)
+    src_root = str(Path(__file__).resolve().parents[1])
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = src_root if not existing_pythonpath else src_root + os.pathsep + existing_pythonpath
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    process = subprocess.Popen(
+        command,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=os.name != "nt",
+        creationflags=creationflags,
+    )
+    upsert_bridge(port, window_pid=process.pid, window_url=url)
+    handle = WindowHandle(port=port, url=url, pid=process.pid, owned=True)
+    if close_on_exit:
+        atexit.register(handle.close)
+    return handle
+
+
 def discover_web_url(port: int) -> str:
     override = os.environ.get("XLOCLLM_WEB_URL")
     if override:

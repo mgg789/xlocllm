@@ -60,6 +60,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _print_json([item.to_dict() for item in items])
         if command == "model":
             return _print_json(catalog_model(args.name, unit=args.unit, mode=args.mode).to_dict())
+        if command == "cache":
+            return handle_cache(args)
         if command == "run":
             rt = create_runtime(
                 [create_unit(args.unit, args.model, mode=args.mode, reasoning=args.reasoning)],
@@ -122,6 +124,14 @@ def build_parser() -> argparse.ArgumentParser:
     bridge_parser.add_argument("--mode", choices=["native", "web"], default=None, help="Bridge mode")
     bridge_parser.add_argument("--port", type=int, default=1146, help="Bridge port")
 
+    cache_parser = subparsers.add_parser("cache", help="Delete cached model artifacts")
+    cache_parser.add_argument("action", choices=["delete", "clear"], help="Cache action")
+    cache_parser.add_argument("--mode", choices=["native", "web"], default=None, help="Cache backend")
+    cache_parser.add_argument("--unit", help="Unit type for cache delete")
+    cache_parser.add_argument("--model", help="Model id, label, or alias for cache delete")
+    cache_parser.add_argument("--port", type=int, default=1146, help="Bridge port for web cache actions")
+    cache_parser.add_argument("--yes", action="store_true", help="Confirm destructive cache deletion")
+
     return parser
 
 
@@ -154,6 +164,29 @@ def _add_model_filters(parser: argparse.ArgumentParser) -> None:
 def _print_json(value: Any) -> int:
     print(json.dumps(value, ensure_ascii=False, indent=2))
     return 0
+
+
+def handle_cache(args: argparse.Namespace) -> int:
+    if not args.yes:
+        raise ValueError("cache deletion requires --yes")
+    selected_mode = current_mode(args.mode)
+    if selected_mode == "native":
+        from ._native_server import clear_native_model_cache, delete_native_model_cache
+
+        if args.action == "clear":
+            return _print_json({"ok": True, "mode": "native", "deleted": clear_native_model_cache()})
+        if not args.unit or not args.model:
+            raise ValueError("cache delete requires --unit and --model")
+        resolved = catalog_model(args.model, unit=args.unit, mode="native").to_dict()
+        return _print_json(
+            {"ok": True, "mode": "native", "deleted": delete_native_model_cache(resolved)}
+        )
+    bridge = Bridge(port=args.port).activate(daemon=True)
+    if args.action == "clear":
+        return _print_json(bridge.delete_all_models(confirm=True))
+    if not args.unit or not args.model:
+        raise ValueError("cache delete requires --unit and --model")
+    return _print_json(bridge.delete_model(args.unit, args.model))
 
 
 if __name__ == "__main__":

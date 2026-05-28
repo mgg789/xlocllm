@@ -44,6 +44,19 @@ def test_rag_methods_require_runtime() -> None:
         rag.search("hello")
 
 
+def test_onnx_service_unit_payload_and_predict_guard() -> None:
+    regression = xlocllm.unit(
+        "regression",
+        "demo-regressor",
+        options={"model_path": "model.onnx", "input_name": "float_input"},
+    )
+
+    assert regression.type == "onnx"
+    assert regression.to_payload()["options"]["model_path"] == "model.onnx"
+    with pytest.raises(RuntimeError, match="not attached"):
+        regression.predict([[1.0, 2.0]])
+
+
 def test_runtime_attaches_nested_rag() -> None:
     emb = xlocllm.unit("embedding", "multilingual-e5-small")
     rag = xlocllm.rag(emb=emb)

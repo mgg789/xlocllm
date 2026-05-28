@@ -15,6 +15,18 @@ CPU_FALLBACK_TIERS = {"tiny", "small"}
 CPU_FALLBACK_MAX_VRAM_MB = 1500
 CPU_FALLBACK_MAX_DISK_MB = 1600
 NATIVE_MODELS_PER_UNIT = 4
+DEFAULT_GGUF_QUANT = "q4"
+GGUF_QUANT_FALLBACK_ORDER = ["q4", "q8", "fp16", "fp32", "q6", "q5", "q3", "q2"]
+GGUF_QUANTIZATION_PATTERNS: dict[str, list[str]] = {
+    "q2": ["*Q2_K*.gguf", "*Q2*.gguf"],
+    "q3": ["*Q3_K_M*.gguf", "*Q3_K*.gguf", "*Q3*.gguf"],
+    "q4": ["*Q4_K_M*.gguf", "*Q4_K*.gguf", "*Q4*.gguf"],
+    "q5": ["*Q5_K_M*.gguf", "*Q5_K*.gguf", "*Q5*.gguf"],
+    "q6": ["*Q6_K*.gguf", "*Q6*.gguf"],
+    "q8": ["*Q8_0*.gguf", "*Q8*.gguf"],
+    "fp16": ["*F16*.gguf", "*f16*.gguf", "*FP16*.gguf", "*fp16*.gguf"],
+    "fp32": ["*F32*.gguf", "*f32*.gguf", "*FP32*.gguf", "*fp32*.gguf"],
+}
 NATIVE_PRIORITY_ALIASES: dict[str, list[str]] = {
     "embedding": ["multilingual-e5-small", "all-MiniLM-L6-v2"],
     "reranker": ["bge-reranker-v2-m3", "bge-reranker-base"],
@@ -43,11 +55,15 @@ NATIVE_LLM_MODELS: list[dict[str, Any]] = [
         "format": "gguf",
         "task": "text-generation",
         "taskGroup": "LLM",
-        "modelId": "Qwen3-0.6B-Q4_K_M-GGUF",
+        "modelId": "Qwen3-0.6B-GGUF",
         "backendModelId": "Qwen/Qwen3-0.6B-GGUF",
         "repo": "Qwen/Qwen3-0.6B-GGUF",
-        "files": ["*Q4_K_M*.gguf", "*Q4*.gguf", "*.gguf"],
+        "files": GGUF_QUANTIZATION_PATTERNS[DEFAULT_GGUF_QUANT],
+        "quantizations": GGUF_QUANTIZATION_PATTERNS,
+        "defaultQuantization": DEFAULT_GGUF_QUANT,
+        "quantizationFallbackOrder": GGUF_QUANT_FALLBACK_ORDER,
         "aliases": [
+            "Qwen3-0.6B-Q4_K_M-GGUF",
             "Qwen-3.5-0.8b",
             "Qwen-3.5-0.8b-full",
             "Qwen-3.5-0.8b-fp32",
@@ -56,7 +72,7 @@ NATIVE_LLM_MODELS: list[dict[str, Any]] = [
             "qwen3-0.6b",
             "qwen-native-small",
         ],
-        "label": "Qwen3 0.6B GGUF q4",
+        "label": "Qwen3 0.6B GGUF",
         "provider": "Qwen",
         "logoKey": "model",
         "languages": ["multilingual"],
@@ -82,11 +98,14 @@ NATIVE_LLM_MODELS: list[dict[str, Any]] = [
         "format": "gguf",
         "task": "text-generation",
         "taskGroup": "LLM",
-        "modelId": "SmolLM2-360M-Instruct-Q4_K_M-GGUF",
+        "modelId": "SmolLM2-360M-Instruct-GGUF",
         "backendModelId": "bartowski/SmolLM2-360M-Instruct-GGUF",
         "repo": "bartowski/SmolLM2-360M-Instruct-GGUF",
-        "files": ["*Q4_K_M*.gguf", "*Q4*.gguf", "*.gguf"],
-        "aliases": ["SmolLM2-360M", "smollm2", "smollm2-native"],
+        "files": GGUF_QUANTIZATION_PATTERNS[DEFAULT_GGUF_QUANT],
+        "quantizations": GGUF_QUANTIZATION_PATTERNS,
+        "defaultQuantization": DEFAULT_GGUF_QUANT,
+        "quantizationFallbackOrder": GGUF_QUANT_FALLBACK_ORDER,
+        "aliases": ["SmolLM2-360M-Instruct-Q4_K_M-GGUF", "SmolLM2-360M", "smollm2", "smollm2-native"],
         "label": "SmolLM2 360M Instruct GGUF",
         "provider": "HuggingFaceTB",
         "logoKey": "huggingface",
@@ -113,11 +132,14 @@ NATIVE_LLM_MODELS: list[dict[str, Any]] = [
         "format": "gguf",
         "task": "text-generation",
         "taskGroup": "LLM",
-        "modelId": "Llama-3.2-1B-Instruct-Q4_K_M-GGUF",
+        "modelId": "Llama-3.2-1B-Instruct-GGUF",
         "backendModelId": "bartowski/Llama-3.2-1B-Instruct-GGUF",
         "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF",
-        "files": ["*Q4_K_M*.gguf", "*Q4*.gguf", "*.gguf"],
-        "aliases": ["Llama-3.2-1b", "llama-1b", "llama-native-small"],
+        "files": GGUF_QUANTIZATION_PATTERNS[DEFAULT_GGUF_QUANT],
+        "quantizations": GGUF_QUANTIZATION_PATTERNS,
+        "defaultQuantization": DEFAULT_GGUF_QUANT,
+        "quantizationFallbackOrder": GGUF_QUANT_FALLBACK_ORDER,
+        "aliases": ["Llama-3.2-1B-Instruct-Q4_K_M-GGUF", "Llama-3.2-1b", "llama-1b", "llama-native-small"],
         "label": "Llama 3.2 1B Instruct GGUF",
         "provider": "Meta",
         "logoKey": "model",
@@ -144,11 +166,14 @@ NATIVE_LLM_MODELS: list[dict[str, Any]] = [
         "format": "gguf",
         "task": "text-generation",
         "taskGroup": "LLM",
-        "modelId": "Phi-3.5-mini-instruct-Q4_K_M-GGUF",
+        "modelId": "Phi-3.5-mini-instruct-GGUF",
         "backendModelId": "bartowski/Phi-3.5-mini-instruct-GGUF",
         "repo": "bartowski/Phi-3.5-mini-instruct-GGUF",
-        "files": ["*Q4_K_M*.gguf", "*Q4*.gguf", "*.gguf"],
-        "aliases": ["Phi-4-mini", "phi4-mini", "phi3.5-mini-native"],
+        "files": GGUF_QUANTIZATION_PATTERNS[DEFAULT_GGUF_QUANT],
+        "quantizations": GGUF_QUANTIZATION_PATTERNS,
+        "defaultQuantization": DEFAULT_GGUF_QUANT,
+        "quantizationFallbackOrder": GGUF_QUANT_FALLBACK_ORDER,
+        "aliases": ["Phi-3.5-mini-instruct-Q4_K_M-GGUF", "Phi-4-mini", "phi4-mini", "phi3.5-mini-native"],
         "label": "Phi 3.5 mini Instruct GGUF",
         "provider": "Microsoft",
         "logoKey": "microsoft",
@@ -378,7 +403,13 @@ def cpu_fallback_model_ids(*, min_per_unit: int = 2, mode: str | None = None) ->
     return result
 
 
-def resolve_model(unit_type: str, model_name: str, *, mode: str | None = None) -> dict[str, Any]:
+def resolve_model(
+    unit_type: str,
+    model_name: str,
+    *,
+    mode: str | None = None,
+    quant: str | None = None,
+) -> dict[str, Any]:
     resolved_mode = current_mode(mode)
     normalized_unit = normalize_unit(unit_type)
     normalized_model = _normalize(model_name)
@@ -391,14 +422,20 @@ def resolve_model(unit_type: str, model_name: str, *, mode: str | None = None) -
             _normalize(model["label"]),
             *aliases,
         }:
-            return model
+            return select_quantization(model, quant=quant) if resolved_mode == "native" else model
     raise ModelNotFound(f"Model not found for unit={unit_type!r} model={model_name!r} mode={resolved_mode!r}")
 
 
-def model(name: str, unit: str | None = None, *, mode: str | None = None) -> ModelInfo:
+def model(
+    name: str,
+    unit: str | None = None,
+    *,
+    mode: str | None = None,
+    quant: str | None = None,
+) -> ModelInfo:
     resolved_mode = current_mode(mode)
     if unit is not None:
-        return ModelInfo(resolve_model(unit, name, mode=resolved_mode))
+        return ModelInfo(resolve_model(unit, name, mode=resolved_mode, quant=quant))
     normalized_model = _normalize(name)
     for candidate in all_models(mode=resolved_mode):
         aliases = [_normalize(alias) for alias in candidate.get("aliases", [])]
@@ -407,8 +444,27 @@ def model(name: str, unit: str | None = None, *, mode: str | None = None) -> Mod
             _normalize(candidate["label"]),
             *aliases,
         }:
-            return ModelInfo(candidate)
+            return ModelInfo(select_quantization(candidate, quant=quant) if resolved_mode == "native" else candidate)
     raise ModelNotFound(f"Model not found: {name!r} mode={resolved_mode!r}")
+
+
+def select_quantization(candidate: dict[str, Any], *, quant: str | None = None) -> dict[str, Any]:
+    if candidate.get("format") != "gguf":
+        return dict(candidate)
+    quantizations = candidate.get("quantizations")
+    if not isinstance(quantizations, dict):
+        return dict(candidate)
+    selected = normalize_quantization(quant or str(candidate.get("defaultQuantization") or DEFAULT_GGUF_QUANT))
+    if selected not in quantizations:
+        available = ", ".join(sorted(str(key) for key in quantizations))
+        raise ModelNotFound(
+            f"Quantization {quant!r} is not declared for {candidate.get('modelId')!r}. Available: {available}"
+        )
+    result = dict(candidate)
+    result["selectedQuantization"] = selected
+    result["requestedQuantization"] = normalize_quantization(quant) if quant else None
+    result["files"] = [str(item) for item in quantizations[selected]]
+    return result
 
 
 def models(
@@ -429,6 +485,7 @@ def models(
     installed: bool | None = None,
     hardware: str | None = None,
     include_unavailable: bool = False,
+    quant: str | None = None,
     search: str | None = None,
     max_vram_mb: int | None = None,
     max_disk_mb: int | None = None,
@@ -501,7 +558,8 @@ def models(
             )
             if normalized_search not in _normalize(haystack):
                 continue
-        result.append(ModelInfo(candidate))
+        result_candidate = select_quantization(candidate, quant=quant) if resolved_mode == "native" else candidate
+        result.append(ModelInfo(result_candidate))
     if limit_per_unit is not None:
         result = _limit_models_per_unit(result, limit_per_unit)
     return result
@@ -542,6 +600,43 @@ def normalize_unit(unit_type: str) -> str:
         if _normalize(unit["type"]) == value or _normalize(unit["label"]) == value:
             return str(unit["type"])
     raise UnitNotFound(f"Unknown xlocllm unit type: {unit_type!r}")
+
+
+def normalize_quantization(value: str | None) -> str:
+    normalized = _normalize(value or DEFAULT_GGUF_QUANT).replace("-", "")
+    aliases = {
+        "2": "q2",
+        "q2k": "q2",
+        "q2": "q2",
+        "3": "q3",
+        "q3k": "q3",
+        "q3km": "q3",
+        "q3": "q3",
+        "4": "q4",
+        "q4k": "q4",
+        "q4km": "q4",
+        "q4": "q4",
+        "5": "q5",
+        "q5k": "q5",
+        "q5km": "q5",
+        "q5": "q5",
+        "6": "q6",
+        "q6k": "q6",
+        "q6": "q6",
+        "8": "q8",
+        "q80": "q8",
+        "q8": "q8",
+        "f16": "fp16",
+        "float16": "fp16",
+        "fp16": "fp16",
+        "f32": "fp32",
+        "float32": "fp32",
+        "fp32": "fp32",
+    }
+    if normalized not in aliases:
+        available = ", ".join(GGUF_QUANTIZATION_PATTERNS)
+        raise ValueError(f"Unknown quantization {value!r}. Use one of: {available}")
+    return aliases[normalized]
 
 
 def catalog_path() -> Path:

@@ -32,7 +32,8 @@ print(runtime.chat("Say hello", temperature=0))
 - Starts a local FastAPI bridge on `127.0.0.1`.
 - Uses `native` mode by default; use `xlocllm.mode = "web"` or
   `runtime(..., mode="web")` for the browser runtime.
-- Opens a small dashboard window for status and controls.
+- Opens a small dashboard window for status and controls. Native mode uses a
+  non-browser desktop monitor; web mode keeps the paired browser runtime window.
 - Runs model engines locally in native mode, or inside the paired browser in web
   mode.
 - Provides OpenAI-compatible `/v1` endpoints for local clients.
@@ -134,7 +135,7 @@ models = xlocllm.models(unit="LLM", max_vram_mb=1500)
 native_models = xlocllm.models(mode="native")
 cpu_models = xlocllm.models(mode="web", webgpu=False)
 
-unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None)
+unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", quant="q4", reasoning=None)
 store = xlocllm.vectorstorage("kb")
 rag = xlocllm.rag(emb=xlocllm.unit("embedding", "multilingual-e5-small"), store=store)
 runtime = xlocllm.runtime([unit], port=1146)
@@ -161,6 +162,23 @@ llm = xlocllm.unit("LLM", "Qwen-3.5-0.8b-fp32", reasoning=False)
 runtime.set_reasoning(llm.id, True)
 ```
 
+For native GGUF LLMs, `quant=` accepts values such as `q2`, `q4`, `q8`,
+`fp16`, and `fp32`. If omitted, xlocllm requests `q4` and falls back to the
+next available quantization without changing the model name.
+
+Custom ONNX models can run as service units:
+
+```python
+reg = xlocllm.unit(
+    "regression",
+    "local-sklearn-regression",
+    options={"model_path": "model.onnx", "input_name": "float_input"},
+)
+with xlocllm.runtime([reg]) as runtime:
+    runtime.run()
+    print(reg.predict([[1.0, 2.0, 3.0]]))
+```
+
 CLI:
 
 ```powershell
@@ -172,6 +190,8 @@ xlocllm models --unit LLM
 xlocllm models --unit LLM --mode web --no-webgpu
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b"
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b" --mode web
+xlocllm cache delete --mode native --unit LLM --model "Qwen-3.5-0.8b" --yes
+xlocllm cache clear --mode native --yes
 ```
 
 ## Documentation

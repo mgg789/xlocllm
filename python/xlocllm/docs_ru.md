@@ -106,23 +106,32 @@ with xlocllm.runtime([llm]) as runtime:
 
 ## Top-Level API
 
-### `xlocllm.unit(type, model, reasoning=None, options=None, rag=None, mode=None)`
+### `xlocllm.unit(type, model, quant=None, reasoning=None, options=None, rag=None, mode=None)`
 
-Создает `Unit`, нормализуя тип и имя модели через каталог.
-`reasoning` включает или выключает thinking/reasoning для LLM-семейств, которые
-это поддерживают. `options` передается в выбранный runtime как настройки unit.
-`mode=None` берет `xlocllm.mode`; по умолчанию это `"native"`. Для LLM можно
-передать `rag=<RAG unit>`, тогда chat-запросы будут автоматически делать
-retrieval перед генерацией.
+Создает `Unit`, нормализуя тип и имя модели через каталог. `quant` работает для
+native GGUF LLM и принимает значения вроде `"q2"`, `"q4"`, `"q8"`, `"fp16"`,
+`"fp32"`. Если параметр не указан, xlocllm сначала просит `q4`, затем откатывается
+к `q8`, `fp16`, `fp32` и другим доступным GGUF-квантованиям, не меняя публичное
+имя модели. `reasoning` включает или выключает thinking/reasoning для
+LLM-семейств, которые это поддерживают. `options` передается в выбранный runtime
+как настройки unit. `mode=None` берет `xlocllm.mode`; по умолчанию это
+`"native"`. Для LLM можно передать `rag=<RAG unit>`, тогда chat-запросы будут
+автоматически делать retrieval перед генерацией.
 
 ```python
 unit = xlocllm.unit("chat", "qwen-0.8b")
+q8 = xlocllm.unit("LLM", "Qwen-3.5-0.8b", quant="q8")
 print(unit.type)   # LLM
 print(unit.mode)   # native
 ```
 
 Модель можно указывать через точный `modelId`, `label` или любой alias из
 каталога.
+
+Service units не требуют модели из каталога. Например,
+`xlocllm.unit("regression", "...", options={"model_path": "model.onnx"})`
+создает native ONNX unit; после подключения к запущенному runtime его можно
+вызывать через `unit.predict([[...]])`.
 
 ### `xlocllm.vectorstorage(name="default", backend="indexeddb", metric="cosine", persist=True, namespace="default", options=None, mode=None)`
 
@@ -163,7 +172,7 @@ runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b")], port=12000)
 web_runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b", mode="web")], mode="web")
 ```
 
-### `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False)`
+### `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False, quant=None)`
 
 Возвращает модели каталога как `ModelInfo`.
 
@@ -192,6 +201,7 @@ web_runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b", mode="web")]
 - `hardware` - опциональный снимок железа для native-фильтрации
 - `include_unavailable` - показать native-записи даже если engine/hardware policy
   считает их недоступными
+- `quant` - выбрать GGUF-квантование в metadata для native LLM
 
 Пример:
 
@@ -205,12 +215,13 @@ cpu_web_models = xlocllm.models(unit="LLM", mode="web", webgpu=False)
 модели. В fallback-каталоге остается минимум одна usable-модель для каждого
 типа unit, если в каталоге есть подходящий Transformers.js кандидат.
 
-### `xlocllm.model(name, unit=None, mode=None)`
+### `xlocllm.model(name, unit=None, mode=None, quant=None)`
 
 Возвращает одну модель как `ModelInfo`.
 
 ```python
 info = xlocllm.model("Qwen-3.5-0.8b", unit="LLM")
+q8 = xlocllm.model("Qwen-3.5-0.8b", unit="LLM", quant="q8")
 print(info.model_id)
 print(info.to_dict())
 ```
@@ -269,6 +280,7 @@ llm_fit = xlocllm.benchmark("LLM")
 - `unit.label`
 - `unit.model_info`
 - `unit.mode`
+- `unit.quant` - выбранное GGUF-квантование для native LLM, если применимо
 - `unit.reasoning`
 - `unit.options`
 - `unit.rag` - подключенный RAG unit для LLM, если настроен
@@ -296,6 +308,7 @@ llm_fit = xlocllm.benchmark("LLM")
 - `unit.clear(**params)` - очистить namespace RAG/vector store
 - `unit.stats()` - статистика RAG/vector storage
 - `unit.reindex(**params)` - переэмбеддить существующие RAG chunks
+- `unit.predict(inputs, **params)` - выполнить custom native ONNX/regression unit
 
 ## Runtime API
 
@@ -341,6 +354,12 @@ llm_fit = xlocllm.benchmark("LLM")
 запущен и `delete_cache=False`, SDK попросит выбранный backend деактивировать
 модель. Если `delete_cache=True`, SDK дополнительно запросит очистку cache
 модели.
+
+`runtime.open()` открывает dashboard. В web mode это остается paired browser
+mini-window, в котором живет browser runtime. В native mode открывается
+небраузерное desktop-окно со статусом, метриками, логами и кнопками
+Start/Pause/Clear; сами native-модели выполняются в локальных Python/native
+engine, а не внутри этого окна.
 
 ## RAG и Vector Storage
 
@@ -493,11 +512,24 @@ client = runtime.client()  # требует optional package openai
 Native engines, скачанные model artifacts и native vector storage живут внутри
 этой же папки `XLOCLLM_HOME`.
 
+CLI для cache:
+
+```powershell
+xlocllm cache delete --mode native --unit LLM --model "Qwen-3.5-0.8b" --yes
+xlocllm cache clear --mode native --yes
+xlocllm cache clear --mode web --yes
+```
+
+`cache delete` удаляет одну модель из cache. `cache clear` удаляет все model
+artifacts выбранного backend. Native engine packages при этом сохраняются,
+удаляются только модели.
+
 ## Особенности native runtime
 
 Native mode - режим по умолчанию. Dashboard window в native режиме только
 показывает состояние и дает управление: процессы, downloads, queue, loaded units
-и resource metrics. Модели не исполняются в этом окне браузера.
+и resource metrics. Это небраузерное desktop-окно. Модели не исполняются внутри
+dashboard; в web mode сохраняется старое browser mini-window поведение.
 
 LLM в native режиме используют GGUF через llama.cpp-compatible loading. Остальные
 task-модели используют ONNX Runtime pipelines там, где это возможно. Перед
@@ -556,6 +588,8 @@ xlocllm model "Qwen-3.5-0.8b-fp32" --unit LLM
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b" --port 1146
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b" --mode web
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b-fp32" --no-reasoning
+xlocllm cache delete --mode native --unit LLM --model "Qwen-3.5-0.8b" --yes
+xlocllm cache clear --mode native --yes
 xlocllm bridge --port 1146
 xlocllm bridge --mode web --port 1146
 ```
@@ -573,12 +607,12 @@ voice assistant, OCR/document intelligence и других частых зада
 Доступно напрямую из `xlocllm`:
 
 - `xlocllm.mode` - глобальный runtime mode, по умолчанию `"native"`
-- `xlocllm.unit(type, model, reasoning=None, options=None, rag=None, mode=None) -> Unit`
+- `xlocllm.unit(type, model, quant=None, reasoning=None, options=None, rag=None, mode=None) -> Unit`
 - `xlocllm.vectorstorage(name="default", ..., mode=None) -> Unit`
 - `xlocllm.rag(emb, rerank=None, store=None, ..., mode=None) -> Unit`
 - `xlocllm.runtime(units, port=1146, bridge=None, runtime_id=None, mode=None) -> Runtime`
-- `xlocllm.model(name, unit=None, mode=None) -> ModelInfo`
-- `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False) -> list[ModelInfo]`
+- `xlocllm.model(name, unit=None, mode=None, quant=None) -> ModelInfo`
+- `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False, quant=None) -> list[ModelInfo]`
 - `xlocllm.bridges(active_only=True) -> list[Bridge | NativeBridge]`
 - `xlocllm.runtimes(active_only=True) -> list[Runtime]`
 - `xlocllm.status() -> dict`
@@ -626,7 +660,7 @@ voice assistant, OCR/document intelligence и других частых зада
 Обычно создается так:
 
 ```python
-unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None, rag=None, mode=None)
+unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", quant=None, reasoning=None, options=None, rag=None, mode=None)
 ```
 
 Свойства:
@@ -635,6 +669,7 @@ unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None, rag=No
 - `model: str` - точный resolved model id.
 - `model_info: ModelInfo | None` - запись каталога.
 - `mode: str | None` - выбранный runtime mode.
+- `quant: str | None` - выбранное GGUF-квантование для native LLM.
 - `reasoning: bool | None` - настройка reasoning для поддерживающих LLM.
 - `options: dict[str, Any]` - runtime options для unit.
 - `rag: Unit | None` - подключенный RAG service для LLM units.

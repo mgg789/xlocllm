@@ -13,8 +13,11 @@ import sys
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 import uvicorn
@@ -23,7 +26,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from ._paths import native_engine_dir, native_model_dir, native_store_dir
-from .catalog import all_models, all_units, resolve_model, supports_reasoning
+from .catalog import (
+    DEFAULT_GGUF_QUANT,
+    GGUF_QUANT_FALLBACK_ORDER,
+    all_models,
+    all_units,
+    normalize_quantization,
+    resolve_model,
+    supports_reasoning,
+)
 from .registry import remove_bridge, upsert_bridge
 
 
@@ -53,6 +64,17 @@ class NativeInstance:
     progress: int | None = None
     error: str | None = None
     engine: Any = None
+
+
+@dataclass
+class CustomOnnxUnit:
+    name: str
+    path: Path
+    options: dict[str, Any] = field(default_factory=dict)
+    active: bool = True
+    status: str = "selected"
+    error: str | None = None
+    session: Any = None
 
 
 @dataclass
@@ -132,6 +154,7 @@ class NativeRuntime:
         self.instances: dict[str, NativeInstance] = {}
         self.vector_stores: dict[str, VectorStore] = {}
         self.rags: dict[str, RagPipeline] = {}
+        self.custom_onnx: dict[str, CustomOnnxUnit] = {}
         self.logs: list[dict[str, Any]] = []
         self.installing = False
         self.install_progress = 0
@@ -246,6 +269,16 @@ class NativeRuntime:
         request = payload.get("unit")
         if not isinstance(request, dict):
             raise RuntimeError("configure_unit requires a unit payload")
+        unit_type = normalize_unit_type(str(request.get("type") or ""))
+        if unit_type == "vectorstorage":
+            self.configure_store_unit(request)
+            return self.status()
+        if unit_type == "rag":
+            self.configure_rag_unit(request)
+            return self.status()
+        if unit_type == "onnx":
+            self.configure_onnx_unit(request)
+            return self.status()
         instance = self.ensure_instance(request)
         if "reasoning" in request:
             reasoning = request.get("reasoning")
@@ -262,13 +295,21 @@ class NativeRuntime:
     def delete_model(self, payload: dict[str, Any]) -> dict[str, Any]:
         unit = str(payload.get("unit") or "")
         model = str(payload.get("model") or unit)
+        deleted: list[str] = []
         try:
             resolved = resolve_model(unit, model, mode="native")
-            self.instances.pop(str(resolved["modelId"]), None)
+            instance = self.instances.pop(str(resolved["modelId"]), None)
+            if instance is not None:
+                instance.engine = None
+            deleted = delete_native_model_cache(resolved)
         except Exception:
-            self.instances.pop(model, None)
+            instance = self.instances.pop(model, None)
+            if instance is not None:
+                instance.engine = None
         self.running = any(instance.status == "running" for instance in self.instances.values())
-        return self.status()
+        result = self.status()
+        result["deleted"] = deleted
+        return result
 
     def delete_all_models(self) -> dict[str, Any]:
         for instance in self.instances.values():
@@ -276,7 +317,10 @@ class NativeRuntime:
             instance.installed = False
             instance.status = "selected"
         self.running = False
-        return self.status()
+        deleted = clear_native_model_cache()
+        result = self.status()
+        result["deleted"] = deleted
+        return result
 
     def infer(self, endpoint: str, payload: dict[str, Any]) -> Any:
         route = normalize_endpoint(endpoint)
@@ -294,6 +338,8 @@ class NativeRuntime:
                 return self.vector_endpoint(route, payload)
             if route in {"rag.add", "rag.search", "rag.delete", "rag.clear", "rag.reindex", "rag.stats"}:
                 return self.rag_endpoint(route, payload)
+            if route in {"onnx", "onnx.predict", "regression", "regression.predict"}:
+                return self.onnx_predict(payload)
             return self.generic_pipeline(route, payload)
         finally:
             self.requests["processing"] = max(0, self.requests["processing"] - 1)
@@ -355,6 +401,35 @@ class NativeRuntime:
         if route in {"zero-shot-text", "zero-shot-classification", "zero.shot.text"}:
             options["candidate_labels"] = payload.get("labels") or payload.get("candidate_labels")
         return pipe(input_value, **options)
+
+    def onnx_predict(self, payload: dict[str, Any]) -> dict[str, Any]:
+        unit = self.onnx_from_payload(payload)
+        session = self.ensure_custom_onnx_loaded(unit)
+        try:
+            import numpy as np
+        except ImportError as error:
+            raise RuntimeError(native_dependency_error("numpy", {"modelId": unit.name})) from error
+
+        raw_inputs = payload.get("inputs", payload.get("input", payload.get("data")))
+        if isinstance(raw_inputs, dict):
+            feeds = {str(key): np.asarray(value, dtype=np.float32) for key, value in raw_inputs.items()}
+        else:
+            array = np.asarray(raw_inputs, dtype=np.float32)
+            if array.ndim == 1:
+                array = array.reshape(1, -1)
+            input_name = str(unit.options.get("input_name") or session.get_inputs()[0].name)
+            feeds = {input_name: array}
+
+        raw_output_names = payload.get("output_names") or unit.options.get("output_names")
+        output_names = [str(item) for item in raw_output_names] if isinstance(raw_output_names, list) else None
+        outputs = session.run(output_names, feeds)
+        public_outputs = [output.tolist() if hasattr(output, "tolist") else output for output in outputs]
+        return {
+            "ok": True,
+            "model": unit.name,
+            "outputs": public_outputs,
+            "prediction": public_outputs[0] if public_outputs else None,
+        }
 
     def vector_endpoint(self, route: str, payload: dict[str, Any]) -> dict[str, Any]:
         store = self.store_from_payload(payload)
@@ -432,6 +507,9 @@ class NativeRuntime:
             if unit_type == "rag":
                 self.configure_rag_unit(request)
                 continue
+            if unit_type == "onnx":
+                self.configure_onnx_unit(request)
+                continue
             instance = self.ensure_instance(request)
             self.apply_request(instance, request)
             model_units.append(request)
@@ -440,10 +518,24 @@ class NativeRuntime:
     def ensure_instance(self, request: dict[str, Any]) -> NativeInstance:
         unit_type = str(request.get("type") or "")
         model_name = str(request.get("model") or "")
-        model = resolve_model(unit_type, model_name, mode="native")
+        raw_quant = request.get("quant")
+        if not isinstance(raw_quant, str) and isinstance(request.get("options"), dict):
+            option_quant = request["options"].get("quant")
+            raw_quant = option_quant if isinstance(option_quant, str) else None
+        requested_quant = raw_quant if isinstance(raw_quant, str) else None
+        model = resolve_model(unit_type, model_name, mode="native", quant=requested_quant)
         model_id = str(model["modelId"])
         current = self.instances.get(model_id)
         if current is not None:
+            quant_changed = (
+                requested_quant is not None
+                and current.model.get("selectedQuantization") != model.get("selectedQuantization")
+            )
+            if quant_changed:
+                current.model = dict(model)
+                current.engine = None
+                current.installed = False
+                current.status = "selected"
             self.apply_request(current, request)
             return current
         instance = NativeInstance(model=dict(model))
@@ -462,6 +554,28 @@ class NativeRuntime:
         rag_payload = request.get("rag") or instance.options.get("rag")
         if isinstance(rag_payload, dict):
             instance.rag_id = self.configure_rag_unit(rag_payload).name
+
+    def configure_onnx_unit(self, request: dict[str, Any]) -> CustomOnnxUnit:
+        raw_options = request.get("options")
+        options: dict[str, Any] = dict(raw_options) if isinstance(raw_options, dict) else {}
+        name = str(request.get("model") or options.get("name") or "default")
+        raw_path = options.get("model_path") or options.get("path")
+        if not raw_path and name.lower().endswith(".onnx"):
+            raw_path = name
+        if not raw_path:
+            raise RuntimeError("ONNX unit requires options.model_path")
+        path = Path(str(raw_path)).expanduser()
+        unit = self.custom_onnx.get(name)
+        if unit is None:
+            unit = CustomOnnxUnit(name=name, path=path, options=options)
+            self.custom_onnx[name] = unit
+        else:
+            if unit.path != path:
+                unit.path = path
+                unit.session = None
+                unit.status = "selected"
+            unit.options.update(options)
+        return unit
 
     def configure_store_unit(self, request: dict[str, Any]) -> VectorStore:
         raw_options = request.get("options")
@@ -506,8 +620,11 @@ class NativeRuntime:
     def prepare_model(self, instance: NativeInstance, *, install_only: bool) -> None:
         backend = str(instance.model.get("backend") or "onnxruntime")
         ensure_engine(backend, self.log)
-        if backend == "llama.cpp" and not install_only:
-            self.ensure_llm_loaded(instance)
+        if backend == "llama.cpp":
+            model_path = resolve_gguf_model_path(instance.model, self.log)
+            instance.options["_resolved_model_path"] = str(model_path)
+            if not install_only:
+                self.ensure_llm_loaded(instance)
         elif backend == "onnxruntime" and not install_only:
             self.ensure_pipeline_loaded(instance)
 
@@ -519,13 +636,18 @@ class NativeRuntime:
             from llama_cpp import Llama  # type: ignore[import-not-found]
         except ImportError as error:
             raise RuntimeError(native_dependency_error("llama_cpp", instance.model)) from error
-        model_path = resolve_gguf_model_path(instance.model, self.log)
+        resolved_path = instance.options.get("_resolved_model_path")
+        model_path = Path(str(resolved_path)) if resolved_path else resolve_gguf_model_path(instance.model, self.log)
         options = dict(instance.options)
         n_ctx = int(options.get("n_ctx") or options.get("context_window") or 4096)
         raw_gpu_layers = options.get("n_gpu_layers")
         n_gpu_layers = int(default_gpu_layers() if raw_gpu_layers is None else raw_gpu_layers)
         verbose = bool(options.get("verbose", False))
+        quant = instance.model.get("selectedQuantization")
+        size = format_bytes(model_path.stat().st_size) if model_path.exists() else "unknown size"
+        self.log("info", f"Loading {instance.model['label']} quant={quant or 'auto'} from {model_path} ({size})")
         instance.engine = Llama(model_path=str(model_path), n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, verbose=verbose)
+        self.log("info", f"Loaded {instance.model['label']}")
 
     def ensure_pipeline_loaded(self, instance: NativeInstance) -> Any:
         if instance.engine is not None:
@@ -537,10 +659,12 @@ class NativeRuntime:
             raise RuntimeError(native_dependency_error("optimum", instance.model)) from error
         task = str(instance.model["task"])
         model_id = str(instance.model.get("backendModelId") or instance.model["modelId"])
+        self.log("info", f"Loading ONNX Runtime pipeline task={task} model={model_id}")
         try:
             instance.engine = optimum_pipeline(task=task, model=model_id, accelerator="ort")
         except TypeError:
             instance.engine = optimum_pipeline(task, model=model_id, accelerator="ort")
+        self.log("info", f"Loaded ONNX Runtime pipeline task={task} model={model_id}")
         return instance.engine
 
     def instance_for_unit(self, unit: str, model_name: Any) -> NativeInstance:
@@ -594,6 +718,34 @@ class NativeRuntime:
         name = str(payload.get("store") or payload.get("name") or "default")
         return self.configure_store_unit({"type": "vectorstorage", "model": name, "options": payload.get("options") or {}})
 
+    def onnx_from_payload(self, payload: dict[str, Any]) -> CustomOnnxUnit:
+        unit = payload.get("unit")
+        if isinstance(unit, dict):
+            return self.configure_onnx_unit(unit)
+        name = str(payload.get("model") or payload.get("name") or "default")
+        if name not in self.custom_onnx:
+            raise RuntimeError(f"ONNX unit not found: {name}")
+        return self.custom_onnx[name]
+
+    def ensure_custom_onnx_loaded(self, unit: CustomOnnxUnit) -> Any:
+        if unit.session is not None:
+            return unit.session
+        ensure_engine("onnxruntime", self.log)
+        try:
+            import onnxruntime as ort
+        except ImportError as error:
+            raise RuntimeError(native_dependency_error("onnxruntime", {"modelId": unit.name})) from error
+        if not unit.path.exists():
+            raise RuntimeError(f"ONNX file does not exist: {unit.path}")
+        providers = unit.options.get("providers")
+        provider_list = [str(item) for item in providers] if isinstance(providers, list) else ort.get_available_providers()
+        self.log("info", f"Loading custom ONNX unit {unit.name} from {unit.path}")
+        unit.session = ort.InferenceSession(str(unit.path), providers=provider_list)
+        unit.status = "running"
+        unit.error = None
+        self.log("info", f"Loaded custom ONNX unit {unit.name}")
+        return unit.session
+
     def rag_from_payload(self, payload: dict[str, Any]) -> RagPipeline:
         unit = payload.get("unit")
         if isinstance(unit, dict):
@@ -616,6 +768,7 @@ class NativeRuntime:
                     "active": any(instance.active for instance in models),
                     "status": selected.status if selected else "off",
                     "reasoning": selected.reasoning if selected else None,
+                    "quant": selected.model.get("selectedQuantization") if selected else None,
                     "supportsReasoning": supports_reasoning(selected.model) if selected else False,
                     "options": selected.options if selected else {},
                     "progress": selected.progress if selected else None,
@@ -633,6 +786,8 @@ class NativeRuntime:
             "installed": instance.installed,
             "status": instance.status,
             "reasoning": instance.reasoning,
+            "quant": instance.model.get("selectedQuantization"),
+            "requestedQuant": instance.model.get("requestedQuantization"),
             "supportsReasoning": supports_reasoning(instance.model),
             "options": instance.options,
             "progress": instance.progress,
@@ -676,23 +831,41 @@ class NativeRuntime:
             }
             for rag in self.rags.values()
         ]
-        return [*stores, *rags]
+        onnx_units = [
+            {
+                "runtimeId": f"onnx:{unit.name}",
+                "type": "onnx",
+                "active": unit.active,
+                "status": unit.status,
+                "options": {
+                    **unit.options,
+                    "model_path": str(unit.path),
+                    "loaded": unit.session is not None,
+                },
+                "error": unit.error,
+            }
+            for unit in self.custom_onnx.values()
+        ]
+        return [*stores, *rags, *onnx_units]
 
     def log(self, level: str, message: str) -> None:
         self.logs.append({"time": time.time(), "level": level, "message": message})
         self.logs = self.logs[-500:]
+        print(f"[xlocllm:{level}] {message}", file=sys.stderr, flush=True)
 
 
 def create_app(port: int, token: str, live_time: float | None = None) -> FastAPI:
     runtime = NativeRuntime(token)
-    app = FastAPI(title="xlocllm native bridge", version="0.1.0")
-    app.state.runtime = runtime
-    app.state.live_time = live_time
 
-    @app.on_event("startup")
-    async def schedule_live_time_shutdown() -> None:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if live_time is not None and live_time > 0:
             asyncio.create_task(shutdown_after(app, port, live_time))
+        yield
+
+    app = FastAPI(title="xlocllm native bridge", version="0.1.0", lifespan=lifespan)
+    app.state.runtime = runtime
+    app.state.live_time = live_time
 
     app.add_middleware(
         CORSMiddleware,
@@ -913,7 +1086,7 @@ def ensure_engine(backend: str, log: Any) -> None:
         raise RuntimeError(f"Native backend {backend} requires packages: {', '.join(missing)}")
     requirements = list(dict.fromkeys(missing))
     target = ensure_native_import_path()
-    log("info", f"Installing native backend dependencies into {target}")
+    log("info", f"Installing native backend dependencies into {target}: {', '.join(requirements)}")
     command = [
         sys.executable,
         "-m",
@@ -925,13 +1098,14 @@ def ensure_engine(backend: str, log: Any) -> None:
         "--no-warn-script-location",
         *requirements,
     ]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    result = subprocess.run(command, check=False)
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(
             "Native dependency installation failed for "
-            f"{backend} on {platform.platform()} Python {platform.python_version()}: {detail}"
+            f"{backend} on {platform.platform()} Python {platform.python_version()}. "
+            f"Diagnostic command: {' '.join(command)}"
         )
+    log("info", f"Installed native backend dependencies for {backend}")
     importlib.invalidate_caches()
 
 
@@ -944,15 +1118,135 @@ def resolve_gguf_model_path(model: dict[str, Any], log: Any) -> Path:
     repo = str(model.get("repo") or model.get("backendModelId") or model.get("modelId"))
     patterns = [str(item) for item in model.get("files", ["*.gguf"])]
     try:
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import HfApi, hf_hub_download
     except ImportError as error:
         raise RuntimeError(native_dependency_error("huggingface_hub", model)) from error
-    log("info", f"Downloading/selecting GGUF model from {repo}")
-    folder = snapshot_download(repo_id=repo, allow_patterns=patterns, cache_dir=str(native_model_dir()))
-    candidates = sorted(Path(folder).rglob("*.gguf"), key=lambda path: path.stat().st_size)
-    if not candidates:
-        raise RuntimeError(f"No GGUF file matched {patterns} in {repo}")
-    return candidates[0]
+    selected_quant = model.get("selectedQuantization")
+    fallback_order = gguf_quant_fallback_order(model)
+    quantizations = model.get("quantizations")
+    attempts: list[tuple[str | None, list[str]]] = []
+    if isinstance(quantizations, dict):
+        for quant in fallback_order:
+            raw_patterns = quantizations.get(quant)
+            if isinstance(raw_patterns, list):
+                attempts.append((quant, [str(item) for item in raw_patterns]))
+    if not attempts:
+        attempts.append((selected_quant if isinstance(selected_quant, str) else None, patterns))
+
+    last_error: Exception | None = None
+    for quant, quant_patterns in attempts:
+        try:
+            quant_label = quant or "auto"
+            log(
+                "info",
+                f"Downloading/selecting GGUF model from {repo} quant={quant_label} patterns={quant_patterns}",
+            )
+            filename = select_hf_gguf_filename(repo, quant_patterns, HfApi())
+            if filename is None:
+                raise RuntimeError(f"No GGUF file matched {quant_patterns} in {repo}")
+            local_path = Path(
+                hf_hub_download(
+                    repo_id=repo,
+                    filename=filename,
+                    cache_dir=str(native_model_dir()),
+                )
+            )
+            candidate = local_path
+            if not candidate.exists():
+                raise RuntimeError(f"Downloaded GGUF file is missing: {candidate}")
+            if quant and model.get("selectedQuantization") != quant:
+                model["selectedQuantization"] = quant
+                model["files"] = quant_patterns
+            log("info", f"Selected GGUF file {candidate.name} ({format_bytes(candidate.stat().st_size)})")
+            return candidate
+        except Exception as error:  # noqa: BLE001
+            last_error = error
+            log("warning", f"GGUF quant={quant or 'auto'} unavailable for {repo}: {error}")
+    raise RuntimeError(f"No GGUF file matched requested quantizations in {repo}: {last_error}")
+
+
+def select_hf_gguf_filename(repo_id: str, patterns: list[str], api: Any) -> str | None:
+    files = [str(item) for item in api.list_repo_files(repo_id=repo_id)]
+    gguf_files = [item for item in files if item.lower().endswith(".gguf")]
+    for pattern in patterns:
+        matches = sorted(
+            item
+            for item in gguf_files
+            if fnmatch(PurePosixPath(item).name, pattern) or fnmatch(item, pattern)
+        )
+        if matches:
+            return matches[0]
+    return None
+
+
+def gguf_quant_fallback_order(model: dict[str, Any]) -> list[str]:
+    requested = model.get("requestedQuantization") or model.get("selectedQuantization") or DEFAULT_GGUF_QUANT
+    try:
+        requested_quant = normalize_quantization(str(requested))
+    except ValueError:
+        requested_quant = DEFAULT_GGUF_QUANT
+    raw_order = model.get("quantizationFallbackOrder")
+    base_order = [str(item) for item in raw_order] if isinstance(raw_order, list) else GGUF_QUANT_FALLBACK_ORDER
+    result = [requested_quant]
+    for quant in base_order:
+        normalized = normalize_quantization(str(quant))
+        if normalized not in result:
+            result.append(normalized)
+    return result
+
+
+def format_bytes(size: int | float) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
+def delete_native_model_cache(model: dict[str, Any]) -> list[str]:
+    repo = str(model.get("repo") or model.get("backendModelId") or model.get("modelId") or "")
+    if not repo:
+        return []
+    cache_name = hf_cache_folder_name(repo)
+    roots = [native_model_dir(), native_model_dir() / "hf-home" / "hub"]
+    deleted: list[str] = []
+    for root in roots:
+        target = root / cache_name
+        if safe_rmtree(target, root):
+            deleted.append(str(target))
+    return deleted
+
+
+def clear_native_model_cache() -> list[str]:
+    root = native_model_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    deleted: list[str] = []
+    for item in root.iterdir():
+        if safe_rmtree(item, root):
+            deleted.append(str(item))
+    return deleted
+
+
+def hf_cache_folder_name(repo_id: str) -> str:
+    return "models--" + repo_id.replace("/", "--")
+
+
+def safe_rmtree(path: Path, root: Path) -> bool:
+    try:
+        resolved = path.resolve()
+        resolved_root = root.resolve()
+    except OSError:
+        return False
+    if resolved == resolved_root or resolved_root not in resolved.parents:
+        return False
+    if not resolved.exists():
+        return False
+    if resolved.is_dir():
+        shutil.rmtree(resolved)
+    else:
+        resolved.unlink()
+    return True
 
 
 def native_dependency_error(import_name: str, model: dict[str, Any]) -> str:
@@ -1154,6 +1448,8 @@ def normalize_unit_type(value: str) -> str:
         return "rag"
     if normalized in {"vectorstorage", "vectorstore", "vector"}:
         return "vectorstorage"
+    if normalized in {"onnx", "onnxmodel", "onnxruntime", "regression"}:
+        return "onnx"
     return value
 
 
@@ -1347,7 +1643,8 @@ def extract_content(result: Any) -> str:
 
 
 def native_dashboard_html(port: int) -> str:
-    return f"""<!doctype html>
+    del port
+    return """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -1370,7 +1667,7 @@ def native_dashboard_html(port: int) -> str:
 </head>
 <body>
 <main>
-  <header><h1>xlocllm</h1><span class="pill">native - {port}</span></header>
+  <header><h1>xlocllm</h1><span class="pill">native</span></header>
   <section class="gauges">
     <div class="card"><span>GPU</span><div id="gpu" class="value">--</div></div>
     <div class="card"><span>CPU</span><div id="cpu" class="value">--</div></div>

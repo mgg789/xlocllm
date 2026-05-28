@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import os
 import subprocess
 import sys
 import threading
@@ -9,7 +10,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._http import request_json
-from ._native_server import run_server
 from .catalog import all_models, all_units
 from .registry import bridge_record, process_exists, remove_bridge, upsert_bridge
 
@@ -42,7 +42,9 @@ class NativeBridge:
         if daemon:
             creationflags = 0
             if sys.platform == "win32":
-                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+            env = dict(os.environ)
+            env.setdefault("PYTHONUNBUFFERED", "1")
             subprocess.Popen(
                 [
                     sys.executable,
@@ -50,18 +52,16 @@ class NativeBridge:
                     "xlocllm._native_server",
                     "--port",
                     str(self.port),
-                    "--token",
-                    self.token,
+                    f"--token={self.token}",
                     *([] if self.live_time is None else ["--live-time", str(self.live_time)]),
                 ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                env=env,
                 start_new_session=sys.platform != "win32",
                 creationflags=creationflags,
             )
         else:
             self._thread = threading.Thread(
-                target=run_server,
+                target=_run_server_thread,
                 kwargs={"port": self.port, "token": self.token, "live_time": self.live_time},
                 daemon=True,
             )
@@ -165,3 +165,9 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _run_server_thread(port: int, token: str, live_time: float | None) -> None:
+    from ._native_server import run_server
+
+    run_server(port=port, token=token, live_time=live_time)

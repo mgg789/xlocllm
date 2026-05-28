@@ -24,9 +24,22 @@ def load_registry() -> dict[str, Any]:
 
 def save_registry(registry: dict[str, Any]) -> None:
     path = registry_path()
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     tmp.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
+    last_error: PermissionError | None = None
+    for _ in range(10):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError as error:
+            last_error = error
+            time.sleep(0.05)
+    try:
+        tmp.unlink(missing_ok=True)
+    except OSError:
+        pass
+    if last_error is not None:
+        raise last_error
 
 
 def bridge_record(port: int) -> dict[str, Any] | None:

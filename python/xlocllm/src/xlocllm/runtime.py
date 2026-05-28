@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import uuid
 from dataclasses import dataclass, field
 from collections.abc import Mapping, Sequence
@@ -12,10 +13,10 @@ from ._mode import RuntimeMode, current_mode
 from .native_bridge import NativeBridge
 from .registry import all_runtime_records, bridge_record, process_exists, remove_runtime, upsert_runtime
 from .types import UnitRequest
-from .window import WindowHandle, discover_web_url, window
+from .window import WindowHandle, discover_web_url, native_dashboard_window, window
 
 
-SERVICE_UNIT_TYPES = {"vectorstorage", "RAG"}
+SERVICE_UNIT_TYPES = {"vectorstorage", "RAG", "onnx"}
 _RAG_UNSET: Any = object()
 BridgeLike = Bridge | NativeBridge
 
@@ -26,6 +27,7 @@ class Unit:
     model: str
     model_info: ModelInfo | None = None
     mode: RuntimeMode | None = None
+    quant: str | None = None
     reasoning: bool | None = None
     options: dict[str, Any] = field(default_factory=dict)
     rag: Unit | None = field(default=None, repr=False, compare=False)
@@ -48,6 +50,8 @@ class Unit:
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"type": self.type, "model": self.model}
+        if self.quant is not None:
+            payload["quant"] = self.quant
         if self.reasoning is not None:
             payload["reasoning"] = self.reasoning
         if self.options:
@@ -64,6 +68,7 @@ class Unit:
                 "label": self.label,
                 "supports_reasoning": self.supports_reasoning,
                 "mode": self.mode,
+                "quant": self.quant,
             }
         )
         if self.model_info is not None:
@@ -158,6 +163,11 @@ class Unit:
         if self.type != "RAG":
             raise ValueError(f"{self.type} units do not support reindex()")
         return self._invoke_bound("rag.reindex", params)
+
+    def predict(self, inputs: Any = None, **params: Any) -> dict[str, Any]:
+        if self.type != "onnx":
+            raise ValueError(f"{self.type} units do not support predict()")
+        return self._invoke_bound("onnx.predict", {"inputs": inputs, **params})
 
     def delete(
         self,
@@ -380,6 +390,8 @@ class Runtime:
         self._ensure_runtime_window(bridge)
         if self.mode == "web":
             self._wait_for_browser(bridge)
+        elif self.mode == "native":
+            _console_log("Installing native engines/models. Downloads can take several minutes.")
         result = bridge._post(
             "/xlocllm/v1/runtime/install",
             {"units": [unit.to_payload() for unit in self._units]},
@@ -394,6 +406,8 @@ class Runtime:
         self._ensure_runtime_window(bridge)
         if self.mode == "web":
             self._wait_for_browser(bridge)
+        elif self.mode == "native":
+            _console_log("Starting native runtime. Engine/model logs will stream below.")
         result = bridge._post(
             "/xlocllm/v1/runtime/run",
             {"units": [unit.to_payload() for unit in self._units]},
@@ -495,8 +509,22 @@ class Runtime:
 
     def open(self) -> WindowHandle:
         bridge = self._require_bridge()
-        web_url = f"http://127.0.0.1:{bridge.port}/native-dashboard" if self.mode == "native" else None
-        self.window_handle = window(port=bridge.port, token=bridge.token, close_on_exit=False, mode="mini", web_url=web_url)
+        if self.mode == "native":
+            self.window_handle = native_dashboard_window(
+                port=bridge.port,
+                token=bridge.token,
+                close_on_exit=False,
+                width=440,
+                height=430,
+            )
+            return self.window_handle
+        self.window_handle = window(
+            port=bridge.port,
+            token=bridge.token,
+            close_on_exit=False,
+            mode="mini",
+            height=400,
+        )
         return self.window_handle
 
     def chatui(
@@ -549,15 +577,15 @@ class Runtime:
         return self.chat_window_handle
 
     def close(self) -> dict[str, Any]:
-        result = self._require_bridge().close()
-        remove_runtime(self.id)
-        self.running = False
         if self.window_handle:
             self.window_handle.close()
             self.window_handle = None
         if self.chat_window_handle:
             self.chat_window_handle.close()
             self.chat_window_handle = None
+        result = self._require_bridge().close()
+        remove_runtime(self.id)
+        self.running = False
         return result
 
     def wait_ready(self, timeout: float | None = None, require_browser: bool = False) -> Runtime:
@@ -586,16 +614,23 @@ class Runtime:
             self.window_handle is None
             or (self.window_handle.owned and self.window_handle.pid is not None and not process_exists(self.window_handle.pid))
         ):
-            web_url = f"http://127.0.0.1:{bridge.port}/native-dashboard" if self.mode == "native" else None
-            self.window_handle = window(
-                port=bridge.port,
-                token=bridge.token,
-                close_on_exit=False,
-                mode="mini",
-                width=420,
-                height=340,
-                web_url=web_url,
-            )
+            if self.mode == "native":
+                self.window_handle = native_dashboard_window(
+                    port=bridge.port,
+                    token=bridge.token,
+                    close_on_exit=False,
+                    width=440,
+                    height=430,
+                )
+            else:
+                self.window_handle = window(
+                    port=bridge.port,
+                    token=bridge.token,
+                    close_on_exit=False,
+                    mode="mini",
+                    width=420,
+                    height=400,
+                )
         return self.window_handle
 
     def _wait_for_browser(self, bridge: BridgeLike) -> None:
@@ -626,22 +661,28 @@ class Runtime:
                 )
             return item
         if isinstance(item, UnitRequest):
+            item_options = dict(item.options or {})
+            raw_quant = item_options.get("quant")
+            item_quant = raw_quant if isinstance(raw_quant, str) else None
             if _is_service_unit_type(item.type):
                 return Unit(
                     type=_normalize_service_unit_type(item.type),
                     model=item.model,
                     mode=self.mode,
+                    quant=item_quant,
                     reasoning=item.reasoning,
-                    options=dict(item.options or {}),
+                    options=item_options,
                 )
-            resolved = resolve_model(item.type, item.model, mode=self.mode)
+            resolved = resolve_model(item.type, item.model, mode=self.mode, quant=item_quant)
+            selected_quant = resolved.get("selectedQuantization") or item_quant
             return Unit(
                 type=str(resolved["unit"]),
                 model=str(resolved["modelId"]),
                 model_info=ModelInfo(resolved),
                 mode=self.mode,
+                quant=str(selected_quant) if selected_quant else None,
                 reasoning=item.reasoning,
-                options=dict(item.options or {}),
+                options=item_options,
             )
         raise TypeError(f"Unsupported runtime item: {type(item)!r}")
 
@@ -710,6 +751,7 @@ def unit(
     model: str,
     *,
     mode: str | None = None,
+    quant: str | None = None,
     reasoning: bool | None = None,
     options: dict[str, Any] | None = None,
     rag: Unit | UnitRequest | None = None,
@@ -720,16 +762,23 @@ def unit(
             type=_normalize_service_unit_type(type),
             model=model,
             mode=resolved_mode,
+            quant=quant,
             reasoning=reasoning,
             options=dict(options or {}),
         )
-    resolved = resolve_model(type, model, mode=resolved_mode)
+    resolved = resolve_model(type, model, mode=resolved_mode, quant=quant)
     rag_unit = _coerce_nested_unit(rag, mode=resolved_mode) if rag is not None else None
+    selected_quant = (
+        str(resolved.get("selectedQuantization") or quant)
+        if resolved.get("selectedQuantization") or quant
+        else None
+    )
     unit_item = Unit(
         type=str(resolved["unit"]),
         model=str(resolved["modelId"]),
         model_info=ModelInfo(resolved),
         mode=resolved_mode,
+        quant=selected_quant,
         reasoning=reasoning,
         options=dict(options or {}),
         rag=rag_unit,
@@ -884,8 +933,14 @@ def status() -> dict[str, Any]:
     }
 
 
-def model(name: str, unit: str | None = None, *, mode: str | None = None) -> ModelInfo:
-    return catalog_model(name, unit=unit, mode=mode)
+def model(
+    name: str,
+    unit: str | None = None,
+    *,
+    mode: str | None = None,
+    quant: str | None = None,
+) -> ModelInfo:
+    return catalog_model(name, unit=unit, mode=mode, quant=quant)
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -910,6 +965,8 @@ def _normalize_service_unit_type(unit_type: str) -> str:
         return "vectorstorage"
     if normalized == "rag":
         return "RAG"
+    if normalized in {"onnx", "onnxmodel", "onnxruntime", "regression"}:
+        return "onnx"
     return unit_type
 
 
@@ -931,22 +988,28 @@ def _coerce_nested_unit(item: Unit | UnitRequest | None, *, mode: str | None = N
             )
         return item
     if isinstance(item, UnitRequest):
+        item_options = dict(item.options or {})
+        raw_quant = item_options.get("quant")
+        item_quant = raw_quant if isinstance(raw_quant, str) else None
         if _is_service_unit_type(item.type):
             return Unit(
                 type=_normalize_service_unit_type(item.type),
                 model=item.model,
                 mode=resolved_mode,
+                quant=item_quant,
                 reasoning=item.reasoning,
-                options=dict(item.options or {}),
+                options=item_options,
             )
-        resolved = resolve_model(item.type, item.model, mode=resolved_mode)
+        resolved = resolve_model(item.type, item.model, mode=resolved_mode, quant=item_quant)
+        selected_quant = resolved.get("selectedQuantization") or item_quant
         return Unit(
             type=str(resolved["unit"]),
             model=str(resolved["modelId"]),
             model_info=ModelInfo(resolved),
             mode=resolved_mode,
+            quant=str(selected_quant) if selected_quant else None,
             reasoning=item.reasoning,
-            options=dict(item.options or {}),
+            options=item_options,
         )
     raise TypeError(f"Unsupported nested unit: {type(item)!r}")
 
@@ -976,24 +1039,30 @@ def _unit_from_payload(value: Any, *, mode: str | None = None) -> Unit | None:
     if not isinstance(unit_type, str) or not isinstance(model, str):
         return None
     options = value.get("options")
+    unit_options = options if isinstance(options, dict) else {}
+    raw_quant = value.get("quant") if isinstance(value.get("quant"), str) else unit_options.get("quant")
+    payload_quant = raw_quant if isinstance(raw_quant, str) else None
     rag_payload = value.get("rag")
     if _is_service_unit_type(unit_type):
         return Unit(
             type=_normalize_service_unit_type(unit_type),
             model=model,
             mode=resolved_mode,
+            quant=payload_quant,
             reasoning=value.get("reasoning") if isinstance(value.get("reasoning"), bool) else None,
-            options=options if isinstance(options, dict) else {},
+            options=unit_options,
             rag=_unit_from_payload(rag_payload, mode=resolved_mode),
         )
-    resolved = resolve_model(unit_type, model, mode=resolved_mode)
+    resolved = resolve_model(unit_type, model, mode=resolved_mode, quant=payload_quant)
+    selected_quant = resolved.get("selectedQuantization") or payload_quant
     return Unit(
         type=str(resolved["unit"]),
         model=str(resolved["modelId"]),
         model_info=ModelInfo(resolved),
         mode=resolved_mode,
+        quant=str(selected_quant) if selected_quant else None,
         reasoning=value.get("reasoning") if isinstance(value.get("reasoning"), bool) else None,
-        options=options if isinstance(options, dict) else {},
+        options=unit_options,
         rag=_unit_from_payload(rag_payload, mode=resolved_mode),
     )
 
@@ -1014,3 +1083,7 @@ def _ids_payload(ids: str | Sequence[str] | None) -> list[str] | None:
     if isinstance(ids, str):
         return [ids]
     return [str(item) for item in ids]
+
+
+def _console_log(message: str) -> None:
+    print(f"[xlocllm] {message}", file=sys.stderr, flush=True)

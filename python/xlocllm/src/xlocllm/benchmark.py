@@ -16,7 +16,6 @@ from ._paths import config_dir
 from ._mode import current_mode
 from .bridge import Bridge, bridges
 from .catalog import ModelInfo, models, normalize_unit
-from ._native_server import hardware_snapshot
 from .window import WindowHandle, find_chromium, window
 
 HF_URL = "https://huggingface.co"
@@ -82,9 +81,18 @@ def system_snapshot(
         "memory": memory,
         "disk": disk,
         "browser": browser_info,
-        "native": {"hardware": hardware_snapshot(), "engine_cache": str(config_dir() / "native" / "engines")},
+        "native": {
+            "hardware": native_hardware_snapshot(),
+            "engine_cache": str(config_dir() / "native" / "engines"),
+        },
         "network": {"huggingface": hf_ping(timeout=timeout) if ping_hf else {"checked": False}},
     }
+
+
+def native_hardware_snapshot() -> dict[str, Any]:
+    from ._native_server import hardware_snapshot
+
+    return hardware_snapshot()
 
 
 def recommend_models(unit_type: str, snapshot: dict[str, Any], *, mode: str | None = None) -> dict[str, Any]:

@@ -105,22 +105,30 @@ Supported OpenAI-like endpoints:
 
 ## Top-Level API
 
-### `xlocllm.unit(type, model, reasoning=None, options=None, rag=None, mode=None)`
+### `xlocllm.unit(type, model, quant=None, reasoning=None, options=None, rag=None, mode=None)`
 
 Creates a `Unit` by resolving the requested unit type and model name against the
-catalog. `reasoning` may be `True`, `False`, or `None` for LLM families that
-advertise thinking/reasoning control. `options` is a dictionary passed to the
-selected runtime for that unit. `mode` defaults to `xlocllm.mode`, which is
-`"native"` unless changed. For LLM units, pass `rag=<RAG unit>` to enable
-automatic retrieval before chat calls.
+catalog. `quant` is available for native GGUF LLMs and accepts values such as
+`"q2"`, `"q4"`, `"q8"`, `"fp16"`, and `"fp32"`. If omitted, xlocllm requests
+`q4` first and falls back to `q8`, `fp16`, `fp32`, then other available GGUF
+quantizations without changing the public model id. `reasoning` may be `True`,
+`False`, or `None` for LLM families that advertise thinking/reasoning control.
+`options` is a dictionary passed to the selected runtime for that unit. `mode`
+defaults to `xlocllm.mode`, which is `"native"` unless changed. For LLM units,
+pass `rag=<RAG unit>` to enable automatic retrieval before chat calls.
 
 ```python
 unit = xlocllm.unit("chat", "qwen-0.8b")
+q8 = xlocllm.unit("LLM", "Qwen-3.5-0.8b", quant="q8")
 print(unit.type)   # LLM
 print(unit.mode)   # native
 ```
 
 Accepted model names include exact `modelId`, `label`, and catalog aliases.
+
+Service units do not need a catalog model. `xlocllm.unit("regression", "...",
+options={"model_path": "model.onnx"})` creates a native custom ONNX unit; call
+`unit.predict([[...]])` after the unit is attached to a running runtime.
 
 ### `xlocllm.vectorstorage(name="default", backend="indexeddb", metric="cosine", persist=True, namespace="default", options=None, mode=None)`
 
@@ -160,7 +168,7 @@ runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b")], port=12000)
 web_runtime = xlocllm.runtime([xlocllm.unit("LLM", "Qwen-3.5-0.8b", mode="web")], mode="web")
 ```
 
-### `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False)`
+### `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False, quant=None)`
 
 Returns filtered catalog entries as `ModelInfo` objects.
 
@@ -189,6 +197,7 @@ Filters:
 - `hardware` - optional hardware snapshot used for native availability filtering
 - `include_unavailable` - include native catalog entries even when local engine
   or hardware policy says they are unavailable
+- `quant` - select GGUF quantization metadata for native LLM entries
 
 Example:
 
@@ -203,12 +212,13 @@ Transformers.js models. The fallback catalog keeps at least one usable model for
 every unit class whenever the catalog contains a Transformers.js candidate for
 that class.
 
-### `xlocllm.model(name, unit=None, mode=None)`
+### `xlocllm.model(name, unit=None, mode=None, quant=None)`
 
 Returns one `ModelInfo`.
 
 ```python
 info = xlocllm.model("Qwen-3.5-0.8b", unit="LLM")
+q8 = xlocllm.model("Qwen-3.5-0.8b", unit="LLM", quant="q8")
 print(info.model_id)
 print(info.to_dict())
 ```
@@ -267,6 +277,7 @@ Properties:
 - `unit.label`
 - `unit.model_info`
 - `unit.mode`
+- `unit.quant` - selected GGUF quantization for native LLMs, when applicable
 - `unit.reasoning`
 - `unit.options`
 - `unit.rag` - attached RAG unit for LLM units, when configured
@@ -294,6 +305,7 @@ Methods:
 - `unit.clear(**params)` - clear a RAG/vector store namespace
 - `unit.stats()` - return RAG/vector store stats
 - `unit.reindex(**params)` - re-embed existing RAG chunks
+- `unit.predict(inputs, **params)` - run a custom native ONNX/regression unit
 
 ## Runtime API
 
@@ -342,6 +354,12 @@ and any owned dashboard/browser window when they were started by that runtime.
 runtime is running and `delete_cache=False`, the SDK asks the selected backend
 to deactivate that specific model. If `delete_cache=True`, it requests model
 cache cleanup through the bridge.
+
+`runtime.open()` opens the runtime dashboard. In web mode this remains the
+paired browser mini-window used by the browser runtime. In native mode it opens
+a small non-browser desktop dashboard that shows local process metrics, model
+states, logs, and Start/Pause/Clear controls; native models run in local
+Python/native engines, not inside the dashboard window.
 
 ## RAG and Vector Storage
 
@@ -492,11 +510,24 @@ Default state locations:
 Native engines, downloaded model artifacts, and native vector storage live under
 the same `XLOCLLM_HOME` tree.
 
+Cache CLI:
+
+```powershell
+xlocllm cache delete --mode native --unit LLM --model "Qwen-3.5-0.8b" --yes
+xlocllm cache clear --mode native --yes
+xlocllm cache clear --mode web --yes
+```
+
+`cache delete` removes one model cache entry. `cache clear` removes all model
+artifacts for the selected backend. Native engine packages are kept; only model
+artifacts are deleted.
+
 ## Native Runtime Notes
 
 Native mode is the default. The dashboard window is a monitor/control surface:
 it shows process, download, queue, loaded-unit, and resource status, but model
-weights are not executed in that browser window.
+weights are not executed in the dashboard. The native dashboard is a small
+non-browser desktop window. Web mode keeps the browser mini-window behavior.
 
 Native LLMs use GGUF through llama.cpp-compatible loading. Non-LLM tasks use
 ONNX Runtime pipelines where available. The install planner checks the selected
@@ -560,6 +591,8 @@ xlocllm model "Qwen-3.5-0.8b-fp32" --unit LLM
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b" --port 1146
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b" --mode web
 xlocllm run --unit LLM --model "Qwen-3.5-0.8b-fp32" --no-reasoning
+xlocllm cache delete --mode native --unit LLM --model "Qwen-3.5-0.8b" --yes
+xlocllm cache clear --mode native --yes
 xlocllm bridge --port 1146
 xlocllm bridge --mode web --port 1146
 ```
@@ -577,12 +610,12 @@ assistant, OCR/document intelligence, and other common tasks live in
 Imported directly from `xlocllm`:
 
 - `xlocllm.mode` - global runtime mode, `"native"` by default; set to `"web"` for browser mode
-- `xlocllm.unit(type, model, reasoning=None, options=None, rag=None, mode=None) -> Unit`
+- `xlocllm.unit(type, model, quant=None, reasoning=None, options=None, rag=None, mode=None) -> Unit`
 - `xlocllm.vectorstorage(name="default", ..., mode=None) -> Unit`
 - `xlocllm.rag(emb, rerank=None, store=None, ..., mode=None) -> Unit`
 - `xlocllm.runtime(units, port=1146, bridge=None, runtime_id=None, mode=None) -> Runtime`
-- `xlocllm.model(name, unit=None, mode=None) -> ModelInfo`
-- `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False) -> list[ModelInfo]`
+- `xlocllm.model(name, unit=None, mode=None, quant=None) -> ModelInfo`
+- `xlocllm.models(..., mode=None, installed=None, hardware=None, include_unavailable=False, quant=None) -> list[ModelInfo]`
 - `xlocllm.cpu_fallback_model_ids() -> set[str]`
 - `xlocllm.supports_cpu_fallback(model_dict) -> bool`
 - `xlocllm.supports_reasoning(model_dict) -> bool`
@@ -631,7 +664,7 @@ Methods:
 Constructor is normally not called directly. Prefer:
 
 ```python
-unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", reasoning=None, options=None, rag=None, mode=None)
+unit = xlocllm.unit("LLM", "Qwen-3.5-0.8b", quant=None, reasoning=None, options=None, rag=None, mode=None)
 ```
 
 Properties:
@@ -640,6 +673,7 @@ Properties:
 - `model: str` - resolved exact model id.
 - `model_info: ModelInfo | None` - catalog entry.
 - `mode: str | None` - selected runtime mode for this unit.
+- `quant: str | None` - selected GGUF quantization for native LLMs, when applicable.
 - `reasoning: bool | None` - unit default for reasoning-capable LLMs.
 - `options: dict[str, Any]` - runtime options attached to the unit.
 - `rag: Unit | None` - attached RAG service for LLM units.
@@ -694,6 +728,8 @@ Methods:
   Returns vector/RAG storage stats from the active runtime.
 - `reindex(**params) -> dict[str, Any]`
   Re-embeds existing RAG chunks with the current embedding model.
+- `predict(inputs, **params) -> dict[str, Any]`
+  Runs a custom native `onnx`/`regression` service unit.
 
 ### `Runtime`
 
@@ -772,7 +808,8 @@ Methods:
 - `embed(input, model=None) -> list[Any]`
   Convenience wrapper for `embeddings`.
 - `open() -> WindowHandle`
-  Opens or reopens the native dashboard or browser UI for the attached bridge.
+  Opens or reopens the dashboard for the attached bridge. Native mode uses a
+  non-browser desktop window; web mode opens the paired browser mini-window.
 - `chatui(model=None, session="default", use_rag=True, open_browser=True, width=760, height=860) -> WindowHandle`
   Opens a chat window backed by the running runtime.
 - `close() -> dict[str, Any]`

@@ -36,7 +36,8 @@ def test_unit_and_runtime_shape() -> None:
     assert runtime.url == "http://127.0.0.1:1234/v1"
     assert runtime.mode == "native"
     assert [unit.type for unit in runtime.units()] == ["LLM", "embedding"]
-    assert runtime.units(as_dict=True)[0]["model"] == "Qwen3-0.6B-Q4_K_M-GGUF"
+    assert runtime.units(as_dict=True)[0]["model"] == "Qwen3-0.6B-GGUF"
+    assert runtime.units(as_dict=True)[0]["quant"] == "q4"
 
 
 def test_web_mode_preserves_browser_catalog_shape() -> None:
@@ -99,10 +100,20 @@ def test_model_helpers_return_typed_catalog_items() -> None:
     small_llms = models(unit="LLM", max_vram_mb=1500)
     web_qwen = model("Qwen-3.5-0.8b", unit="LLM", mode="web")
 
-    assert qwen.model_id == "Qwen3-0.6B-Q4_K_M-GGUF"
+    assert qwen.model_id == "Qwen3-0.6B-GGUF"
     assert web_qwen.model_id == "Qwen3.5-0.8B-q4f16_1-MLC"
     assert all(item.unit == "LLM" for item in small_llms)
     assert any(item.model_id == qwen.model_id for item in small_llms)
+
+
+def test_native_quant_parameter_selects_files_without_changing_model_id() -> None:
+    q4 = xlocllm.unit(type="LLM", model="Qwen-3.5-0.8b")
+    q8 = xlocllm.unit(type="LLM", model="Qwen-3.5-0.8b", quant="q8")
+
+    assert q4.model == q8.model == "Qwen3-0.6B-GGUF"
+    assert q4.quant == "q4"
+    assert q8.quant == "q8"
+    assert "Q8" in q8.model_info.to_dict()["files"][0]
 
 
 def test_native_installed_filter_uses_xlocllm_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
